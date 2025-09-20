@@ -23,6 +23,7 @@ from .db import get_engine, safe_execute
 from sqlalchemy import text
 from .introspect import list_tables, table_columns, schema_fingerprint
 from .agent import load_or_build_schema_summary
+from .system_ops import SystemOperations
 
 console = Console()
 
@@ -93,6 +94,7 @@ class VastConversation:
         
         self.client = OpenAI(api_key=settings.openai_api_key)
         self.engine = get_engine()
+        self.system_ops = SystemOperations()  # Add system operations capability
         
         # Load or initialize
         if self.session_file.exists():
@@ -131,12 +133,19 @@ Your capabilities:
 - Insert and update data
 - Maintain consistency across complex relationships
 - Remember all decisions and patterns for future use
+- Execute system commands for DBA operations using ```bash blocks:
+  * pg_dump: Create database backups (e.g., pg_dump -f backup.sql pagila)
+  * pg_restore: Restore from backups
+  * psql: Execute PostgreSQL commands
+  * vacuumdb: Perform database maintenance
+  * reindexdb: Rebuild indexes
 
 When suggesting database changes:
 1. Explain the reasoning
-2. Show the SQL that will be executed
-3. Consider impacts on existing data
-4. Maintain referential integrity
+2. Show the SQL that will be executed (use ```sql blocks)
+3. Show system commands when needed (use ```bash blocks)
+4. Consider impacts on existing data
+5. Maintain referential integrity
 
 You are conversational but professional. You make decisions like a senior engineer would.
 """
@@ -185,6 +194,188 @@ You are conversational but professional. You make decisions like a senior engine
         )
         self.messages.append(refresh_msg)
         self._save_session()
+    
+    def _execute_system_command(self, cmd: str) -> Dict[str, Any]:
+        """Execute a system command (like pg_dump)"""
+        # Parse the command to determine what type it is
+        cmd_parts = cmd.strip().split()
+        if not cmd_parts:
+            return {"success": False, "error": "Empty command"}
+        
+        command_name = cmd_parts[0]
+        
+        # Map common commands to our system operations
+        if command_name == 'pg_dump':
+            # Parse pg_dump arguments
+            args = self._parse_pg_dump_args(cmd)
+            return self.system_ops.execute_command('pg_dump', args)
+        elif command_name == 'pg_restore':
+            args = self._parse_pg_restore_args(cmd)
+            return self.system_ops.execute_command('pg_restore', args)
+        elif command_name == 'vacuumdb':
+            args = self._parse_vacuumdb_args(cmd)
+            return self.system_ops.execute_command('vacuumdb', args)
+        elif command_name == 'reindexdb':
+            args = self._parse_reindexdb_args(cmd)
+            return self.system_ops.execute_command('reindexdb', args)
+        elif command_name == 'psql':
+            # For psql commands, extract the -c argument
+            args = self._parse_psql_args(cmd)
+            return self.system_ops.execute_command('psql', args)
+        else:
+            return {
+                "success": False,
+                "error": f"Command '{command_name}' is not supported. Supported commands: pg_dump, pg_restore, psql, vacuumdb, reindexdb"
+            }
+    
+    def _parse_pg_dump_args(self, cmd: str) -> Dict[str, Any]:
+        """Parse pg_dump command line arguments"""
+        import shlex
+        parts = shlex.split(cmd)
+        args = {
+            'database': 'pagila',  # default
+            'host': 'localhost',
+            'port': 5433,
+            'username': 'vast_ro',
+            'password': 'vast_ro_pwd'
+        }
+        
+        i = 1  # Skip 'pg_dump'
+        while i < len(parts):
+            if parts[i] == '-h' and i + 1 < len(parts):
+                args['host'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-p' and i + 1 < len(parts):
+                args['port'] = int(parts[i + 1])
+                i += 2
+            elif parts[i] == '-U' and i + 1 < len(parts):
+                args['username'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-d' and i + 1 < len(parts):
+                args['database'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-f' and i + 1 < len(parts):
+                args['output_file'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-F' and i + 1 < len(parts):
+                args['format'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-t' and i + 1 < len(parts):
+                if 'tables' not in args:
+                    args['tables'] = []
+                args['tables'].append(parts[i + 1])
+                i += 2
+            elif parts[i] == '--schema-only':
+                args['schema_only'] = True
+                i += 1
+            elif parts[i] == '--data-only':
+                args['data_only'] = True
+                i += 1
+            elif not parts[i].startswith('-'):
+                # Positional argument (database name)
+                args['database'] = parts[i]
+                i += 1
+            else:
+                i += 1
+        
+        return args
+    
+    def _parse_pg_restore_args(self, cmd: str) -> Dict[str, Any]:
+        """Parse pg_restore command line arguments"""
+        import shlex
+        parts = shlex.split(cmd)
+        args = {'host': 'localhost', 'port': 5433}
+        
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-h' and i + 1 < len(parts):
+                args['host'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-p' and i + 1 < len(parts):
+                args['port'] = int(parts[i + 1])
+                i += 2
+            elif parts[i] == '-U' and i + 1 < len(parts):
+                args['username'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-d' and i + 1 < len(parts):
+                args['database'] = parts[i + 1]
+                i += 2
+            elif not parts[i].startswith('-'):
+                args['input_file'] = parts[i]
+                i += 1
+            else:
+                i += 1
+        
+        return args
+    
+    def _parse_psql_args(self, cmd: str) -> Dict[str, Any]:
+        """Parse psql command line arguments"""
+        import shlex
+        parts = shlex.split(cmd)
+        args = {
+            'database': 'pagila',
+            'host': 'localhost',
+            'port': 5433,
+            'username': 'vast_ro',
+            'password': 'vast_ro_pwd'
+        }
+        
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-c' and i + 1 < len(parts):
+                args['command'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-h' and i + 1 < len(parts):
+                args['host'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-p' and i + 1 < len(parts):
+                args['port'] = int(parts[i + 1])
+                i += 2
+            elif parts[i] == '-U' and i + 1 < len(parts):
+                args['username'] = parts[i + 1]
+                i += 2
+            elif parts[i] == '-d' and i + 1 < len(parts):
+                args['database'] = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+        
+        return args
+    
+    def _parse_vacuumdb_args(self, cmd: str) -> Dict[str, Any]:
+        """Parse vacuumdb command line arguments"""
+        import shlex
+        parts = shlex.split(cmd)
+        args = {'database': 'pagila', 'analyze': False}
+        
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-z':
+                args['analyze'] = True
+                i += 1
+            elif parts[i] == '-d' and i + 1 < len(parts):
+                args['database'] = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+        
+        return args
+    
+    def _parse_reindexdb_args(self, cmd: str) -> Dict[str, Any]:
+        """Parse reindexdb command line arguments"""
+        import shlex
+        parts = shlex.split(cmd)
+        args = {'database': 'pagila'}
+        
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-d' and i + 1 < len(parts):
+                args['database'] = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+        
+        return args
     
     def _execute_sql(self, sql: str, allow_ddl: bool = False) -> Dict[str, Any]:
         """Execute SQL and return results with safety checks"""
@@ -271,6 +462,9 @@ Remember: You are VAST, with direct database access. Current context:
         # Parse response for SQL blocks and actions
         sql_blocks = self._extract_sql_blocks(response)
         
+        # Extract all code blocks
+        code_blocks = self._extract_code_blocks(response)
+        
         # Execute SQL if present and user approves
         if sql_blocks:
             console.print("\n[yellow]📋 Proposed SQL Operations:[/]")
@@ -296,6 +490,21 @@ Remember: You are VAST, with direct database access. Current context:
                     
                     if result["success"]:
                         console.print(f"[green]✓ Executed successfully[/]")
+                        # Convert rows to serializable format
+                        if "rows" in result and result["rows"]:
+                            serializable_rows = []
+                            for row in result["rows"][:10]:  # Limit to 10 rows for storage
+                                try:
+                                    # Try to convert to dict
+                                    if hasattr(row, '_asdict'):
+                                        serializable_rows.append(row._asdict())
+                                    elif hasattr(row, '_mapping'):
+                                        serializable_rows.append(dict(row._mapping))
+                                    else:
+                                        serializable_rows.append(str(row))
+                                except:
+                                    serializable_rows.append(str(row))
+                            result["rows"] = serializable_rows
                         exec_msg = Message(
                             role=MessageRole.EXECUTION,
                             content=f"Executed SQL: {sql[:100]}...",
@@ -310,6 +519,41 @@ Remember: You are VAST, with direct database access. Current context:
                 if any(a.get("type") == "ddl" for a in self.last_actions):
                     self._refresh_schema_context()
         
+        # Handle system commands (bash/shell)
+        bash_blocks = code_blocks.get('bash', []) + code_blocks.get('system', [])
+        if bash_blocks:
+            console.print("\n[yellow]🔧 Proposed System Operations:[/]")
+            for i, cmd in enumerate(bash_blocks, 1):
+                console.print(Panel(Syntax(cmd, "bash"), title=f"System Command {i}"))
+            
+            should_execute = auto_execute
+            if not auto_execute:
+                try:
+                    should_execute = console.input("\n[cyan]Execute these system commands? (yes/no): [/]").lower() == 'yes'
+                except EOFError:
+                    console.print("[dim]Non-interactive mode - skipping execution[/]")
+                    should_execute = False
+            
+            if should_execute:
+                for cmd in bash_blocks:
+                    result = self._execute_system_command(cmd)
+                    self.last_actions.append(result)
+                    
+                    if result["success"]:
+                        console.print(f"[green]✓ System command executed successfully[/]")
+                        if result.get("output_file"):
+                            console.print(f"[cyan]Output file: {result['output_file']}[/]")
+                        exec_msg = Message(
+                            role=MessageRole.EXECUTION,
+                            content=f"Executed system command: {cmd[:100]}...",
+                            metadata=result
+                        )
+                        self.messages.append(exec_msg)
+                        response += f"\n\nSystem command executed: {result.get('message', 'Success')}"
+                    else:
+                        console.print(f"[red]✗ Error: {result['error']}[/]")
+                        response += f"\n\n⚠️ System command error: {result['error']}"
+        
         # Extract and save any business rules or decisions mentioned
         self._extract_context_updates(response)
         
@@ -322,25 +566,42 @@ Remember: You are VAST, with direct database access. Current context:
         
         return response
     
-    def _extract_sql_blocks(self, text: str) -> List[str]:
-        """Extract SQL code blocks from response"""
-        sql_blocks = []
+    def _extract_code_blocks(self, text: str) -> Dict[str, List[str]]:
+        """Extract SQL and system command blocks from the response"""
+        blocks = {"sql": [], "bash": [], "system": []}
         lines = text.split('\n')
-        in_sql = False
-        current_sql = []
+        in_block = False
+        block_type = None
+        current_block = []
         
         for line in lines:
             if line.strip().startswith('```sql'):
-                in_sql = True
-                current_sql = []
-            elif line.strip() == '```' and in_sql:
-                in_sql = False
-                if current_sql:
-                    sql_blocks.append('\n'.join(current_sql))
-            elif in_sql:
-                current_sql.append(line)
+                in_block = True
+                block_type = 'sql'
+                current_block = []
+            elif line.strip().startswith('```bash') or line.strip().startswith('```shell'):
+                in_block = True
+                block_type = 'bash'
+                current_block = []
+            elif line.strip().startswith('```system'):
+                in_block = True
+                block_type = 'system'
+                current_block = []
+            elif line.strip() == '```' and in_block:
+                in_block = False
+                if current_block and block_type:
+                    blocks[block_type].append('\n'.join(current_block))
+                current_block = []
+                block_type = None
+            elif in_block:
+                current_block.append(line)
         
-        return sql_blocks
+        return blocks
+    
+    def _extract_sql_blocks(self, text: str) -> List[str]:
+        """Extract SQL code blocks from response (backward compatibility)"""
+        blocks = self._extract_code_blocks(text)
+        return blocks.get('sql', [])
     
     def _extract_context_updates(self, response: str):
         """Extract business rules and design decisions from response"""

@@ -112,7 +112,7 @@ class VastConversation:
         # Build initial context
         schema_summary = load_or_build_schema_summary()
         self.context = ConversationContext(
-            database_url=settings.database_url,
+            database_url=str(settings.database_url_ro),
             schema_summary=schema_summary,
             last_fingerprint=schema_fingerprint()
         )

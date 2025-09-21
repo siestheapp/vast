@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from sqlalchemy import text
 
 from .agent import plan_sql, plan_sql_with_retry
 from .config import settings
-from .db import safe_execute
+from .db import safe_execute, get_engine
 from .introspect import list_tables, table_columns
 from .actions import (
     pg_dump_database,
@@ -22,10 +23,26 @@ from .knowledge import get_knowledge_store
 from .repo import list_files as repo_list_files, read_file as repo_read_file, write_file as repo_write_file, RepoAccessError
 
 
+def _assert_privileges():
+    """Privilege self-check: fail fast if RW is over-privileged or RO isn't read-only"""
+    # RO must NOT be able to create temp table
+    with get_engine(readonly=True).begin() as conn:
+        try:
+            conn.execute(text("CREATE TEMP TABLE _v_priv_check(id int); DROP TABLE _v_priv_check;"))
+            raise RuntimeError("RO connection can create tables; misconfigured privileges.")
+        except Exception:
+            pass  # expected: permission denied
+
+    # RW SHOULD be able to create temp table (or at least DML)
+    with get_engine(readonly=False).begin() as conn:
+        conn.execute(text("CREATE TEMP TABLE _v_priv_check(id int); DROP TABLE _v_priv_check;"))
+
+
 def environment_status() -> Dict[str, Any]:
     """Return basic environment diagnostics."""
     return {
-        "database_url_configured": bool(settings.database_url),
+        "database_url_ro_configured": bool(settings.database_url_ro),
+        "database_url_rw_configured": bool(settings.database_url_rw),
         "vast_env": settings.env,
         "openai_configured": bool(settings.openai_api_key),
         "openai_model": settings.openai_model,
@@ -150,6 +167,10 @@ def write_file(path: str, content: str) -> Dict[str, Any]:
 
 def apply_sql(path: str) -> Dict[str, Any]:
     return apply_sql_file(path)
+
+
+# Call this once during app init
+_assert_privileges()
 
 
 def load_conversation(session_name: str) -> Dict[str, Any] | None:

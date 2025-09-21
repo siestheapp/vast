@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+import json
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -208,6 +209,14 @@ def create_app() -> FastAPI:
             return service.repo_write(payload.path, payload.content, overwrite=payload.overwrite)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/audit/events")
+    def audit_events(limit: int = Query(200, ge=1, le=2000)) -> Dict[str, Any]:
+        from .audit import AUDIT_FILE
+        if not AUDIT_FILE.exists():
+            return {"events": []}
+        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-limit:]
+        return {"events": [json.loads(x) for x in lines]}
 
     return app
 

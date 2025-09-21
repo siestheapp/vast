@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum, auto
+from typing import Optional, Tuple
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -9,6 +10,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from .config import settings
+from .audit import audit_event
 
 
 class StatementType(Enum):
@@ -17,19 +19,33 @@ class StatementType(Enum):
     DDL = auto()
 
 
-_engine: Engine | None = None
+_engine_ro: Engine | None = None
+_engine_rw: Engine | None = None
 
 
-def get_engine() -> Engine:
-    global _engine
-    if _engine is None:
-        url = settings.database_url.strip()
-        if url.startswith("DATABASE_URL="):
-            url = url.split("=", 1)[1]
-        if not url:
-            raise RuntimeError("DATABASE_URL missing. Set it in .env")
-        _engine = create_engine(url, pool_pre_ping=True)
-    return _engine
+def _mk_engine(url: str) -> Engine:
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        connect_args={
+            "options": (
+                f"-c statement_timeout={settings.default_statement_timeout_ms}"
+                f" -c idle_in_transaction_session_timeout={settings.idle_in_tx_timeout_ms}"
+            )
+        },
+    )
+
+
+def get_engine(readonly: bool = True) -> Engine:
+    global _engine_ro, _engine_rw
+    if readonly:
+        if _engine_ro is None:
+            _engine_ro = _mk_engine(str(settings.database_url_ro))
+        return _engine_ro
+    else:
+        if _engine_rw is None:
+            _engine_rw = _mk_engine(str(settings.database_url_rw))
+        return _engine_rw
 
 
 def _unwrap_with(node: exp.Expression) -> exp.Expression:
@@ -92,24 +108,88 @@ def analyse_sql(sql: str) -> tuple[StatementType, str]:
     return classification, normalized
 
 
+def _estimate_write_rows(sql: str, params: dict | None) -> Optional[int]:
+    """
+    For UPDATE/DELETE/MERGE: try EXPLAIN (FORMAT JSON) to estimate affected rows.
+    Returns None if estimate unavailable.
+    """
+    explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
+    with get_engine(readonly=True).begin() as conn:  # EXPLAIN is read-only
+        res = conn.execute(text(explain_sql), params or {})
+        row = res.fetchone()
+        if not row:
+            return None
+        try:
+            payload = row[0]  # JSON column
+            # Postgres returns a JSON array with a single object
+            plan = payload[0]["Plan"]
+            return int(plan.get("Plan Rows") or plan.get("Rows") or 0)
+        except Exception:
+            return None
+
+
 def safe_execute(
     sql: str,
     params: dict | None = None,
     allow_writes: bool = False,
     force_write: bool = False,
 ):
-    """Analyse and execute SQL with strict guardrails."""
-
+    """
+    - DDL is blocked (use migration workflow).
+    - Writes require allow_writes; if !force_write => DRY RUN (returns preview).
+    - For writes, run EXPLAIN gate and block if estimate exceeds max_write_rows.
+    - Reads use RO engine; actual write execution uses RW engine.
+    """
     stmt_type, normalized_sql = analyse_sql(sql)
 
     if stmt_type is StatementType.DDL:
         raise ValueError("DDL statements are blocked. Use a migration workflow.")
 
-    if stmt_type is StatementType.WRITE:
-        if not allow_writes:
-            raise ValueError("Write queries are disabled. Use --write to permit writes.")
-        if not force_write:
-            return [{"_notice": "DRY RUN — not executed", "_sql": normalized_sql, "_params": params or {}}]
+    try:
+        # before
+        audit_event({
+            "phase": "pre",
+            "stmt_type": stmt_type.name,
+            "sql": normalized_sql,
+            "params": params or {},
+            "allow_writes": allow_writes,
+            "force_write": force_write,
+        })
 
-    with get_engine().begin() as conn:
-        return list(conn.execute(text(normalized_sql), params or {}))
+        if stmt_type is StatementType.WRITE:
+            if not allow_writes:
+                raise ValueError("Write queries are disabled. Use --write to permit writes.")
+
+            # Estimate rows and gate
+            est = _estimate_write_rows(normalized_sql, params)
+            if est is not None and est > settings.max_write_rows:
+                raise ValueError(
+                    f"Write blocked: estimated affected rows {est} exceeds limit {settings.max_write_rows}."
+                )
+
+            if not force_write:
+                audit_event({"phase": "dry_run", "estimated_rows": est})
+                return [{"_notice": "DRY RUN — not executed", "_sql": normalized_sql, "_params": params or {}, "_estimated_rows": est}]
+
+            # Execute with RW engine only when truly writing
+            with get_engine(readonly=False).begin() as conn:
+                result = list(conn.execute(text(normalized_sql), params or {}))
+        else:
+            # READ path — strictly RO engine
+            with get_engine(readonly=True).begin() as conn:
+                result = list(conn.execute(text(normalized_sql), params or {}))
+
+        # after success
+        audit_event({
+            "phase": "post",
+            "success": True,
+            "rows": len(result) if isinstance(result, list) else None,
+        })
+        return result
+    except Exception as exc:
+        audit_event({
+            "phase": "post",
+            "success": False,
+            "error": str(exc),
+        })
+        raise

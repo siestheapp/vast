@@ -46,7 +46,7 @@ def write_text_file(path: str, content: str) -> ActionResult:
 
 def apply_sql_file(filepath: str) -> ActionResult:
     """Apply an .sql file to the configured database in a single transaction using psql."""
-    url = settings.database_url
+    url = str(settings.database_url_rw)  # Use RW for SQL file execution
     if not url:
         return {"ok": False, "command": "", "stdout": "", "stderr": "DATABASE_URL missing", "artifacts": []}
     p = Path(filepath)
@@ -68,7 +68,7 @@ def pg_dump_database(outfile: str | None = None, container_name: str = "vast-pg"
     If local pg_dump fails due to server/client version mismatch, automatically
     dump *inside* the Docker container and copy out.
     """
-    url = settings.database_url
+    url = str(settings.database_url_ro)  # Use RO for dumps
     if not url:
         return {"ok": False, "command": "", "stdout": "", "stderr": "DATABASE_URL missing", "artifacts": []}
 

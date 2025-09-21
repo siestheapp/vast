@@ -164,6 +164,15 @@ Style:
 - No filler text; no repeated disclaimers.
 
 Tone: precise, confident, and free of pleasantries or invitations (no "let me know" or "feel free to ask"). Respond like a senior engineer briefing peers—short, factual sentences, include only necessary detail.
+
+        Authoritative DB Policy:
+        - For any question about the CURRENT database (counts, sizes, existence, schema, relationships, examples), you MUST:
+          1) Generate a read-only SQL query against the connected database,
+          2) Execute it via VAST (no guessing),
+          3) Answer ONLY from the query result. Include a compact Markdown table when helpful.
+        - Never use phrases like “typically”, “usually”, “likely”, or generic answers about databases.
+        - If you cannot run a query, reply: "I need to run a query to determine this." and include the SQL in ```sql fences.
+
 """
         )
         
@@ -530,7 +539,19 @@ Remember: You are VAST, with direct database access. Current context:
         # Clear last actions
         self.last_actions = []
         
-        # MVP: auto-execute dump requests without waiting for the model
+        
+        # --- Fast paths that MUST be grounded on the live DB -----------------
+        text_lower = user_input.lower()
+        if ("biggest tables" in text_lower) or (("largest" in text_lower) and ("tables" in text_lower)):
+            data = self._biggest_tables(limit=10)
+            md = self._render_biggest_tables_markdown(data)
+            assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
+            self.messages.append(assistant_msg)
+            self._save_session()
+            return md
+        # ---------------------------------------------------------------------
+
+# MVP: auto-execute dump requests without waiting for the model
         if re.search(r"\b(sql\s+dump|database\s+dump|\bdump\b|\bbackup\b|\bexport\b)", user_input, re.I):
             # Choose plain format if the user asks for something human-readable
             wants_plain = bool(re.search(r"(human[- ]?readable|plain|.sql|text)", user_input, re.I))
@@ -696,6 +717,7 @@ Remember: You are VAST, with direct database access. Current context:
         self._extract_context_updates(response)
         
         # Add assistant response to history
+        response = self._enforce_grounding(user_input, response)
         assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)
         self.messages.append(assistant_msg)
         

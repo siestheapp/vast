@@ -62,7 +62,7 @@ def _command_name(command: exp.Command) -> str:
 def _classify_statement(expr: exp.Expression) -> StatementType:
     expr = _unwrap_with(expr)
 
-    ddl_nodes = (exp.Create, exp.Alter, exp.Drop, exp.Truncate)
+    ddl_nodes = (exp.Create, exp.AlterTable, exp.Drop, exp.TruncateTable)
     if isinstance(expr, ddl_nodes) or any(expr.find(node) for node in ddl_nodes):
         return StatementType.DDL
 
@@ -84,7 +84,7 @@ def _classify_statement(expr: exp.Expression) -> StatementType:
     if expr.find(exp.Insert) or expr.find(exp.Update) or expr.find(exp.Delete) or expr.find(exp.Merge):
         return StatementType.WRITE
 
-    if expr.find(exp.Create) or expr.find(exp.Drop) or expr.find(exp.Alter) or expr.find(exp.Truncate):
+    if expr.find(exp.Create) or expr.find(exp.Drop) or expr.find(exp.AlterTable) or expr.find(exp.TruncateTable):
         return StatementType.DDL
 
     # Fail closed for unknown statements.

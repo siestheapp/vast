@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Callable
 
 from openai import OpenAI
 from rich.console import Console
@@ -127,6 +127,7 @@ def plan_sql_with_retry(
     force_refresh_schema: bool = False,
     param_hints: Dict[str, Any] | None = None,
     max_retries: int = 2,
+    validator: Callable[[str, Dict[str, Any], bool], Any] | None = None,
 ) -> str:
     """
     Plan SQL with automatic retry on execution errors.
@@ -155,26 +156,30 @@ def plan_sql_with_retry(
             # Validate with dry run (test execution without actually running)
             # This catches SQL syntax errors, missing tables/columns, etc.
             try:
-                # Always test as read-only first to validate SQL structure
                 test_params = param_hints or {}
-                if allow_writes:
-                    # For writes, test with allow_writes=True but force_write=False (dry run)
-                    result = safe_execute(sql, params=test_params, allow_writes=True, force_write=False)
-                    # Check if it's a DRY RUN response (expected for writes)
-                    if result and isinstance(result, list) and len(result) > 0:
-                        if isinstance(result[0], dict) and "_notice" in result[0]:
-                            # This is expected for write operations - it passed validation
-                            console.print("[dim]SQL validated successfully (dry run for write operation)[/]")
-                        else:
-                            # For SELECT queries that return actual results
-                            console.print("[dim]SQL validated successfully[/]")
+
+                if validator is not None:
+                    validator(sql, test_params, allow_writes)
                 else:
-                    # For read-only queries, execute normally
-                    result = safe_execute(sql, params=test_params, allow_writes=False, force_write=False)
-                    console.print("[dim]SQL validated successfully[/]")
-                
+                    # Always test as read-only first to validate SQL structure
+                    if allow_writes:
+                        # For writes, test with allow_writes=True but force_write=False (dry run)
+                        result = safe_execute(sql, params=test_params, allow_writes=True, force_write=False)
+                        # Check if it's a DRY RUN response (expected for writes)
+                        if result and isinstance(result, list) and len(result) > 0:
+                            if isinstance(result[0], dict) and "_notice" in result[0]:
+                                # This is expected for write operations - it passed validation
+                                console.print("[dim]SQL validated successfully (dry run for write operation)[/]")
+                            else:
+                                # For SELECT queries that return actual results
+                                console.print("[dim]SQL validated successfully[/]")
+                    else:
+                        # For read-only queries, execute normally
+                        safe_execute(sql, params=test_params, allow_writes=False, force_write=False)
+                        console.print("[dim]SQL validated successfully[/]")
+
                 return sql
-                
+
             except Exception as validation_error:
                 # SQL execution failed - will retry with error context
                 raise validation_error

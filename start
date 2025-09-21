@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start VAST: ensure Docker + Postgres (pagila) on 5433, venv deps, then run app.
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_DIR"
+
+echo "[start] Project: $PROJECT_DIR"
+
+if [ ! -f .env ]; then
+  echo "[start] WARNING: .env not found. Create one or copy from .env.example"
+fi
+
+ensure_docker() {
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  # Try to start Docker Desktop on macOS
+  if command -v open >/dev/null 2>&1; then
+    echo "[start] Starting Docker Desktop..."
+    open -g -a Docker || true
+  fi
+  echo -n "[start] Waiting for Docker daemon";
+  for i in $(seq 1 60); do
+    if docker info >/dev/null 2>&1; then echo " ready"; return 0; fi
+    echo -n "."; sleep 2
+  done
+  echo
+  echo "[start] ERROR: Docker daemon not available. Please start Docker Desktop."
+  exit 1
+}
+
+ensure_container() {
+  local name="vast-pg"
+  local exists
+  exists=$(docker ps -a --format '{{.Names}}' | grep -w "$name" || true)
+  if [ -n "$exists" ]; then
+    # If not running, start it
+    local running
+    running=$(docker ps --format '{{.Names}}' | grep -w "$name" || true)
+    if [ -z "$running" ]; then
+      echo "[start] Starting existing container $name..."
+      docker start "$name" >/dev/null
+    else
+      echo "[start] Container $name already running."
+    fi
+  else
+    echo "[start] Creating postgres:16 container $name (port 5433 -> 5432) with Pagila seed..."
+    docker run --name "$name" \
+      -e POSTGRES_USER=vast_ro \
+      -e POSTGRES_PASSWORD=vast_ro_pwd \
+      -e POSTGRES_DB=pagila \
+      -p 5433:5432 \
+      -v "$PWD/pagila-schema.sql":/docker-entrypoint-initdb.d/01-schema.sql \
+      -v "$PWD/pagila-data.sql":/docker-entrypoint-initdb.d/02-data.sql \
+      -d postgres:16 >/dev/null
+  fi
+
+  echo -n "[start] Waiting for Postgres (pagila) to become ready";
+  for i in $(seq 1 90); do
+    if docker exec "$name" pg_isready -U vast_ro -d pagila >/dev/null 2>&1; then
+      echo " ready"; return 0; fi
+    echo -n "."; sleep 2
+  done
+  echo
+  echo "[start] ERROR: Postgres did not become ready in time. Check container logs: docker logs $name"
+  exit 1
+}
+
+ensure_venv() {
+  if [ ! -d .venv ]; then
+    echo "[start] Creating virtualenv (.venv)..."
+    python3 -m venv .venv
+  fi
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+  python -m pip install -U pip setuptools wheel >/dev/null
+  if [ -f requirements.txt ]; then
+    echo "[start] Installing dependencies..."
+    pip install -r requirements.txt >/dev/null
+  fi
+}
+
+print_receipt() {
+  echo ""
+  echo "[start] ✅ Environment ready"
+  echo "- Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')"
+  echo "- Container: vast-pg (port 5433 -> 5432)"
+  echo "- Python: $(python -V 2>&1)"
+  echo "- VAST entry: start_vast.py"
+  echo ""
+}
+
+ensure_docker
+ensure_container
+ensure_venv
+print_receipt
+
+echo "[start] Launching VAST (Ctrl+C to exit)"
+exec python start_vast.py
+
+

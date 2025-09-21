@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
@@ -24,6 +25,7 @@ from sqlalchemy import text
 from .introspect import list_tables, table_columns, schema_fingerprint
 from .agent import load_or_build_schema_summary
 from .system_ops import SystemOperations
+from . import service
 
 console = Console()
 
@@ -206,9 +208,18 @@ You are conversational but professional. You make decisions like a senior engine
         
         # Map common commands to our system operations
         if command_name == 'pg_dump':
-            # Parse pg_dump arguments
+            # Prefer unified service path that uses settings.DATABASE_URL and robust defaults
             args = self._parse_pg_dump_args(cmd)
-            return self.system_ops.execute_command('pg_dump', args)
+            outfile = args.get('output_file')
+            res = service.create_dump(outfile=outfile)
+            return {
+                "success": bool(res.get("ok")),
+                "message": "Database dump created successfully" if res.get("ok") else res.get("stderr", "Dump failed"),
+                "output_file": (res.get("artifacts") or [None])[0],
+                "command": res.get("command"),
+                "stderr": res.get("stderr"),
+                "stdout": res.get("stdout"),
+            }
         elif command_name == 'pg_restore':
             args = self._parse_pg_restore_args(cmd)
             return self.system_ops.execute_command('pg_restore', args)
@@ -456,14 +467,55 @@ Remember: You are VAST, with direct database access. Current context:
         # Clear last actions
         self.last_actions = []
         
+        # MVP: auto-execute dump requests without waiting for the model
+        if re.search(r"\b(sql\s+dump|database\s+dump|\bdump\b|\bbackup\b|\bexport\b)", user_input, re.I):
+            # Choose plain format if the user asks for something human-readable
+            wants_plain = bool(re.search(r"(human[- ]?readable|plain|.sql|text)", user_input, re.I))
+            res = service.create_dump(fmt="plain" if wants_plain else "custom")
+            ok = bool(res.get("ok"))
+            path = (res.get("artifacts") or [None])[0]
+            exec_msg = Message(
+                role=MessageRole.EXECUTION,
+                content=f"Executed system command: pg_dump -> {path if path else 'n/a'}",
+                metadata={
+                    "success": ok,
+                    "output_file": path,
+                    "stderr": res.get("stderr"),
+                    "stdout": res.get("stdout"),
+                    "command": res.get("command"),
+                },
+            )
+            self.last_actions.append(exec_msg.metadata)
+            self.messages.append(exec_msg)
+            self._save_session()
+            if ok:
+                return (
+                    f"Created a database dump.\n- File: {path}\n- Format: {'plain SQL' if wants_plain else 'custom (.dump)'}\n- Details: sha256 is in the log output."
+                )
+            else:
+                return (
+                    "Attempted to create a database dump but it failed.\n- Error: "
+                    + (res.get('stderr') or 'unknown error')
+                )
+
         # Get LLM response
         response = self._get_llm_response(user_input)
         
-        # Parse response for SQL blocks and actions
-        sql_blocks = self._extract_sql_blocks(response)
-        
         # Extract all code blocks
         code_blocks = self._extract_code_blocks(response)
+        sql_blocks = list(code_blocks.get('sql', []))
+
+        # Reclassify mis-labeled system commands that appear inside ```sql blocks
+        misclassified = []
+        for sql in sql_blocks:
+            s = sql.strip()
+            if s.startswith('pg_dump') or s.startswith('pg_restore') or s.startswith('psql') or s.startswith('vacuumdb') or s.startswith('reindexdb'):
+                misclassified.append(sql)
+        if misclassified:
+            for m in misclassified:
+                sql_blocks.remove(m)
+            code_blocks.setdefault('bash', [])
+            code_blocks['bash'].extend(misclassified)
         
         # Execute SQL if present and user approves
         if sql_blocks:
@@ -553,6 +605,29 @@ Remember: You are VAST, with direct database access. Current context:
                     else:
                         console.print(f"[red]✗ Error: {result['error']}[/]")
                         response += f"\n\n⚠️ System command error: {result['error']}"
+
+        # Autonomous migration execution: if the model proposes a migration file, write and apply it
+        if 'migrations/' in response and ('```sql' in response or '```SQL' in response):
+            try:
+                import re as _re
+                path_match = _re.search(r"migrations/[-_a-zA-Z0-9./]+\.sql", response)
+                if path_match:
+                    path = path_match.group(0)
+                    start = response.lower().find('```sql')
+                    if start != -1:
+                        start += len('```sql')
+                        end = response.find('```', start)
+                        if end != -1:
+                            sql_content = response[start:end].strip()
+                            wf = service.write_file(path, sql_content)
+                            ap = service.apply_sql(path)
+                            self.last_actions.append({"success": True if ap.get("ok") else False, "type": "ddl", "file": path})
+                            if ap.get("ok"):
+                                response += f"\n\nApplied migration: {path}"
+                            else:
+                                response += f"\n\n⚠️ Failed to apply migration {path}: {ap.get('stderr')}"
+            except Exception as _e:
+                response += f"\n\n⚠️ Migration auto-apply encountered an error: {_e}"
         
         # Extract and save any business rules or decisions mentioned
         self._extract_context_updates(response)

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vast1 Operator Console</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>Vast1 Operator Console</h1>
+    <div class="connection">
+      <label for="apiBase">API base URL:</label>
+      <input id="apiBase" type="text" value="http://localhost:8000">
+      <button id="checkHealth">Check Health</button>
+      <span id="healthStatus"></span>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Chat</h2>
+      <div id="chat" class="chat">
+        <div id="chatMessages" class="chat-messages"></div>
+        <div class="chat-input">
+          <input id="chatText" type="text" placeholder="Type a message and press Enter" />
+          <button id="chatSend">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Ask the Agent</h2>
+      <textarea id="askInput" rows="4" placeholder="Ask a question about the database..."></textarea>
+      <div class="options">
+        <label><input type="checkbox" id="askAllowWrites"> Allow writes</label>
+        <label><input type="checkbox" id="askForceWrite"> Force write</label>
+        <label><input type="checkbox" id="askRefreshSchema"> Refresh schema</label>
+        <label><input type="checkbox" id="askRetry" checked> Retry on failure</label>
+        <label>Max retries <input type="number" id="askMaxRetries" value="2" min="0" max="5"></label>
+      </div>
+      <textarea id="askParams" rows="2" placeholder='JSON params e.g. {"limit": 5}'></textarea>
+      <button id="askSubmit">Submit</button>
+      <pre id="askResult"></pre>
+    </section>
+
+    <section>
+      <h2>Run SQL</h2>
+      <textarea id="sqlInput" rows="4" placeholder="SELECT * FROM public.actor LIMIT 5"></textarea>
+      <div class="options">
+        <label><input type="checkbox" id="sqlAllowWrites"> Allow writes</label>
+        <label><input type="checkbox" id="sqlForceWrite"> Force write</label>
+      </div>
+      <textarea id="sqlParams" rows="2" placeholder='JSON params e.g. {"limit": 5}'></textarea>
+      <button id="sqlSubmit">Execute</button>
+      <pre id="sqlResult"></pre>
+    </section>
+
+    <section>
+      <h2>Schema</h2>
+      <button id="loadTables">Load Tables</button>
+      <ul id="tablesList" class="list"></ul>
+      <div id="columnsView"></div>
+    </section>
+
+    <section>
+      <h2>Artifacts</h2>
+      <button id="loadArtifacts">Refresh Artifacts</button>
+      <ul id="artifactsList" class="list"></ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>Frontend prototype – communicates with Vast1 FastAPI backend.</p>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

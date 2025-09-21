@@ -1,0 +1,156 @@
+"""FastAPI application exposing Vast services over HTTP."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from . import service
+from .conversation import VastConversation
+
+
+class RunSQLRequest(BaseModel):
+    sql: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+    allow_writes: bool = False
+    force_write: bool = False
+
+
+class AskRequest(BaseModel):
+    question: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+    allow_writes: bool = False
+    force_write: bool = False
+    refresh_schema: bool = False
+    retry: bool = True
+    max_retries: int = 2
+
+
+class DumpRequest(BaseModel):
+    outfile: Optional[str] = None
+    container_name: str = "vast-pg"
+    fmt: str = "custom"
+
+
+class RestoreListRequest(BaseModel):
+    dumpfile: str
+
+
+class RestoreRequest(BaseModel):
+    dumpfile: str
+    target_db_url: str
+    drop: bool = False
+
+
+class ConversationRequest(BaseModel):
+    session: str
+
+class ConversationProcessRequest(BaseModel):
+    message: str
+    session: Optional[str] = None
+    auto_execute: bool = False
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Vast1 API", version="0.1.0")
+    conversations: Dict[str, VastConversation] = {}
+
+    @app.get("/health")
+    def health() -> Dict[str, Any]:
+        return {
+            "status": "ok",
+            "environment": service.environment_status(),
+        }
+
+    @app.get("/schema/tables")
+    def get_tables() -> Dict[str, Any]:
+        return {"tables": service.tables()}
+
+    @app.get("/schema/tables/{schema}/{table}")
+    def get_columns(schema: str, table: str) -> Dict[str, Any]:
+        return {"schema": schema, "table": table, "columns": service.columns(schema, table)}
+
+    @app.post("/sql/run")
+    def run_sql(payload: RunSQLRequest) -> Dict[str, Any]:
+        try:
+            result = service.execute_sql(
+                payload.sql,
+                params=payload.params,
+                allow_writes=payload.allow_writes,
+                force_write=payload.force_write,
+            )
+            return {"sql": payload.sql, "result": result}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/agent/ask")
+    def ask_agent(payload: AskRequest) -> Dict[str, Any]:
+        try:
+            outcome = service.plan_and_execute(
+                payload.question,
+                params=payload.params,
+                allow_writes=payload.allow_writes,
+                force_write=payload.force_write,
+                refresh_schema=payload.refresh_schema,
+                retry=payload.retry,
+                max_retries=payload.max_retries,
+            )
+            return outcome
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/artifacts")
+    def artifacts() -> Dict[str, Any]:
+        return {"artifacts": service.list_artifacts()}
+
+    @app.post("/operations/dump")
+    def create_dump(payload: DumpRequest) -> Dict[str, Any]:
+        try:
+            return service.create_dump(outfile=payload.outfile, container_name=payload.container_name, fmt=payload.fmt)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/operations/restore/list")
+    def restore_list(payload: RestoreListRequest) -> Dict[str, Any]:
+        return service.restore_list(payload.dumpfile)
+
+    @app.post("/operations/restore")
+    def restore(payload: RestoreRequest) -> Dict[str, Any]:
+        return service.restore_into(payload.dumpfile, payload.target_db_url, drop=payload.drop)
+
+    @app.post("/conversations/get")
+    def get_conversation(payload: ConversationRequest) -> Dict[str, Any]:
+        convo = service.load_conversation(payload.session)
+        if convo is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return convo
+
+    @app.post("/conversations/process")
+    def process_conversation(payload: ConversationProcessRequest) -> Dict[str, Any]:
+        # Reuse or create a conversation instance for the session
+        sess = payload.session or "desktop"
+        if sess not in conversations:
+            conversations[sess] = VastConversation(sess)
+        conv = conversations[sess]
+        try:
+            resp_text = conv.process(payload.message, auto_execute=payload.auto_execute)
+            return {
+                "session": conv.session_name,
+                "response": resp_text,
+                "actions": conv.last_actions,
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return app
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)

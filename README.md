@@ -70,6 +70,25 @@ For quick queries without conversation:
 python cli.py ask "Show me the top 10 customers by revenue"
 ```
 
+### REST API Service
+
+Run the long-lived service that powers both the CLI and external frontends:
+
+```bash
+uvicorn src.vast.api:app --reload
+```
+
+The API exposes endpoints for health checks, schema inspection, agent-assisted planning/execution, and operational tasks like dumps/restores. Open <http://localhost:8000/docs> for interactive documentation once the server is running.
+
+### Web Frontend Prototype
+
+A lightweight browser UI is available under `frontend/`. Serve it with any static file server, then point it at the API base URL (defaults to `http://localhost:8000`).
+
+```bash
+python -m http.server --directory frontend 5173
+# Visit http://localhost:5173 in your browser
+```
+
 ### Programmatic Usage
 
 ```python

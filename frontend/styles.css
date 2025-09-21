@@ -462,6 +462,17 @@ pre {
   border-top-right-radius: var(--radius-sm);
 }
 
+.bubble .content { 
+  line-height: 1.5; 
+  white-space: normal; 
+}
+.bubble .content p { margin: 0 0 8px; }
+.bubble .content ul, .bubble .content ol { margin: 6px 0 10px 20px; }
+.bubble .content code { padding: 2px 4px; border-radius: 4px; }
+.bubble .content pre { padding: 10px; border-radius: 8px; overflow: auto; }
+.bubble .content table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+.bubble .content th, .bubble .content td { border: 1px solid var(--color-border); padding: 6px 8px; }
+
 .chat-input {
   display: flex;
   gap: var(--space-sm);

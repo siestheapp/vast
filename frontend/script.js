@@ -57,14 +57,24 @@ const request = async (path, options = {}) => {
 };
 
 // --- Chat UI ---
+const renderMarkdown = (md) => DOMPurify.sanitize(marked.parse(md || ''));
+
 const appendBubble = (role, text) => {
   const wrap = document.createElement('div');
-  wrap.className = `bubble ${role}`;
-  wrap.textContent = text;
+  wrap.className = `bubble ${role === 'user' ? 'user' : 'assistant'}`;
+  const html = role === 'assistant' ? renderMarkdown(text) : DOMPurify.sanitize(text || '');
+  wrap.innerHTML = `<div class="content">${html}</div>`;
   wrap.dataset.meta = `${role === 'user' ? 'You' : 'VAST'} • ${formatTime()}`;
   $('#chatMessages').appendChild(wrap);
   $('#chatMessages').scrollTop = $('#chatMessages').scrollHeight;
   return wrap;
+};
+
+// Optional: split very long assistant replies into multiple bubbles
+const renderAssistant = (md) => {
+  const chunks = (md || '').split(/\n{2,}(?=#+\s|[-*]\s|1\.)/); // split on sections/lists
+  if (chunks.length <= 1) return appendBubble('assistant', md);
+  chunks.forEach(c => c.trim() && appendBubble('assistant', c.trim()));
 };
 
 const showTypingIndicator = () => {
@@ -98,7 +108,7 @@ const sendChat = async () => {
       body: JSON.stringify({ message: msg, auto_execute: true }),
     });
     hideTypingIndicator();
-    appendBubble('assistant', data.response || '');
+    renderAssistant(data.response || '');
     if (lastResponse) {
       lastResponse.textContent = formatTime();
     }

@@ -19,6 +19,7 @@ from .actions import (
     apply_sql_file,
 )
 from .knowledge import get_knowledge_store
+from .repo import list_files as repo_list_files, read_file as repo_read_file, write_file as repo_write_file, RepoAccessError
 
 
 def environment_status() -> Dict[str, Any]:
@@ -216,3 +217,30 @@ def list_knowledge_entries(entry_type: str | None = None, limit: int = 50) -> Li
         }
         for entry in entries
     ]
+
+
+# --- Repository helpers -------------------------------------------------
+
+
+def repo_files(subdir: str | None = None) -> Dict[str, Any]:
+    try:
+        files = repo_list_files(subdir=subdir)
+    except RepoAccessError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return {"files": files}
+
+
+def repo_read(path: str) -> Dict[str, Any]:
+    try:
+        content = repo_read_file(path)
+    except RepoAccessError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return {"path": path, "content": content}
+
+
+def repo_write(path: str, content: str, overwrite: bool = False) -> Dict[str, Any]:
+    try:
+        written = repo_write_file(path, content, overwrite=overwrite)
+    except RepoAccessError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return {"path": written, "status": "written"}

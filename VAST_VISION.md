@@ -65,6 +65,11 @@
 - Integrations for CI/CD (migrations), incident responders (PagerDuty), and analytics stacks.
 - Eventually ship managed cloud + enterprise deployment options.
 
+### 7. Repository-Aware Operations
+- Introduce a controlled “code intel” service so VAST can read whitelisted repo artifacts (migrations/, scripts/) without raw filesystem access.
+- Layer safe writers (e.g., generate migration files, open change requests) with human approvals before they reach production branches.
+- Tie code insights back into the knowledge engine so authored migrations and past fixes become reusable context.
+
 ## Milestone Roadmap
 1. **Knowledge + Validator Alpha (Q4 2025)**
    - Vector-backed retrieval in planner, deterministic answer for “who are you / what columns exist.”

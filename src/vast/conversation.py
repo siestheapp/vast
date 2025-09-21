@@ -148,6 +148,7 @@ Your capabilities:
   * psql: Execute PostgreSQL commands
   * vacuumdb: Perform database maintenance
   * reindexdb: Rebuild indexes
+- Generate and apply SQL migration files via the repo helpers (`/repo/write`, `/repo/read`) when changes require persistent scripts.
 
 When suggesting database changes:
 1. Explain the reasoning
@@ -156,7 +157,7 @@ When suggesting database changes:
 4. Consider impacts on existing data
 5. Maintain referential integrity
 
-You are conversational but professional. You make decisions like a senior engineer would.
+Tone: precise, confident, and free of pleasantries or invitations (no "let me know" or "feel free to ask"). Respond like a senior engineer briefing peers—short, factual sentences, include only necessary detail.
 """
         )
         
@@ -453,6 +454,31 @@ You are conversational but professional. You make decisions like a senior engine
             console.print(f"[yellow]Knowledge search failed: {exc}[/]")
             knowledge_entries = []
 
+        # Always remind the model which runtime it is using
+        knowledge_entries.insert(0, type("Injected", (), {
+            "title": "Runtime",
+            "content": f"VAST is running on OpenAI model {settings.openai_model} with embedding model {settings.openai_embedding_model}.",
+        })())
+
+        if any(token in user_input.lower() for token in ("dump", "backup", "restore", "pg_dump")):
+            try:
+                artifacts = service.list_artifacts()
+            except Exception as exc:
+                console.print(f"[yellow]Artifact listing failed: {exc}[/]")
+                artifacts = []
+
+            if artifacts:
+                recent = artifacts[-5:]
+                knowledge_entries.insert(1, type("Injected", (), {
+                    "title": "Database Dumps",
+                    "content": "Latest dumps: " + ", ".join(recent),
+                })())
+            else:
+                knowledge_entries.insert(1, type("Injected", (), {
+                    "title": "Database Dumps",
+                    "content": "No database dumps currently stored in .vast/artifacts.",
+                })())
+
         if knowledge_entries:
             knowledge_blocks = []
             for entry in knowledge_entries:
@@ -650,7 +676,7 @@ Remember: You are VAST, with direct database access. Current context:
                         end = response.find('```', start)
                         if end != -1:
                             sql_content = response[start:end].strip()
-                            wf = service.write_file(path, sql_content)
+                            wf = service.repo_write(path, sql_content, overwrite=True)
                             ap = service.apply_sql(path)
                             self.last_actions.append({"success": True if ap.get("ok") else False, "type": "ddl", "file": path})
                             if ap.get("ok"):

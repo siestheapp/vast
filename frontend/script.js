@@ -12,6 +12,7 @@ const formatTime = (date = new Date()) =>
 const lastConnected = $('#lastConnected');
 const lastResponse = $('#lastResponse');
 const envLabel = $('#envLabel');
+let typingBubble = null;
 
 const setStatus = (variant, message) => {
   const node = $('#healthStatus');
@@ -63,6 +64,25 @@ const appendBubble = (role, text) => {
   wrap.dataset.meta = `${role === 'user' ? 'You' : 'VAST'} • ${formatTime()}`;
   $('#chatMessages').appendChild(wrap);
   $('#chatMessages').scrollTop = $('#chatMessages').scrollHeight;
+  return wrap;
+};
+
+const showTypingIndicator = () => {
+  if (typingBubble) return typingBubble;
+  const wrap = document.createElement('div');
+  wrap.className = 'bubble assistant typing';
+  wrap.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
+  wrap.dataset.meta = 'VAST • thinking';
+  $('#chatMessages').appendChild(wrap);
+  $('#chatMessages').scrollTop = $('#chatMessages').scrollHeight;
+  typingBubble = wrap;
+  return wrap;
+};
+
+const hideTypingIndicator = () => {
+  if (!typingBubble) return;
+  typingBubble.remove();
+  typingBubble = null;
 };
 
 const sendChat = async () => {
@@ -71,16 +91,19 @@ const sendChat = async () => {
   if (!msg) return;
   appendBubble('user', msg);
   input.value = '';
+  showTypingIndicator();
   try {
     const data = await request('/conversations/process', {
       method: 'POST',
       body: JSON.stringify({ message: msg, auto_execute: true }),
     });
+    hideTypingIndicator();
     appendBubble('assistant', data.response || '');
     if (lastResponse) {
       lastResponse.textContent = formatTime();
     }
   } catch (err) {
+    hideTypingIndicator();
     appendBubble('assistant', `Error: ${err.message || String(err)}`);
   }
 };

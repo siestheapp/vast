@@ -62,6 +62,12 @@ class KnowledgeSearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=25)
 
 
+class RepoWriteRequest(BaseModel):
+    path: str
+    content: str
+    overwrite: bool = False
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Vast1 API", version="0.1.0")
     conversations: Dict[str, VastConversation] = {}
@@ -179,6 +185,27 @@ def create_app() -> FastAPI:
         try:
             results = service.knowledge_search(payload.query, top_k=payload.top_k)
             return {"results": results}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/repo/files")
+    def repo_files(subdir: Optional[str] = Query(default=None)) -> Dict[str, Any]:
+        try:
+            return service.repo_files(subdir=subdir)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/repo/read")
+    def repo_read(path: str = Query(...)) -> Dict[str, Any]:
+        try:
+            return service.repo_read(path)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/repo/write")
+    def repo_write(payload: RepoWriteRequest) -> Dict[str, Any]:
+        try:
+            return service.repo_write(payload.path, payload.content, overwrite=payload.overwrite)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

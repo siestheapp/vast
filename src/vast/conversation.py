@@ -545,19 +545,20 @@ Remember: You are VAST, with direct database access. Current context:
         # Clear last actions
         self.last_actions = []
         
-        text_lower = user_input.lower()
-        if ("what database" in text_lower) or ("connected to" in text_lower and "database" in text_lower):
-            md = self._render_db_identity_markdown()
-            assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
-            self.messages.append(assistant_msg)
-            self._save_session()
-            return md
-        
         # --- Fast paths that MUST be grounded on the live DB -----------------
         text_lower = user_input.lower()
-        if ("biggest tables" in text_lower) or (("largest" in text_lower) and ("tables" in text_lower)):
-            data = self._biggest_tables(limit=10)
-            md = self._render_biggest_tables_markdown(data)
+        need_identity = ("what database" in text_lower) or ("connected to" in text_lower and "database" in text_lower)
+        need_biggest = ("biggest tables" in text_lower) or ("largest" in text_lower and "tables" in text_lower)
+
+        if need_identity or need_biggest:
+            sections = []
+            if need_identity:
+                sections.append(self._render_db_identity_markdown())
+            if need_biggest:
+                rows = self._biggest_tables(limit=10)
+                sections.append(self._render_biggest_tables_markdown(rows))
+
+            md = "\n\n---\n\n".join(sections)  # nice visual break
             assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
             self.messages.append(assistant_msg)
             self._save_session()

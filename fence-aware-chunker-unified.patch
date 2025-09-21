@@ -1,0 +1,66 @@
+--- a/frontend/script.js
++++ b/frontend/script.js
+@@
+-const renderAssistant = (md) => {
+-  const chunks = (md || '').split(/\n{2,}(?=#+\s|[-*]\s|1\.)/); // split on sections/lists
+-  if (chunks.length <= 1) return appendBubble('assistant', md);
+-  chunks.forEach(c => c.trim() && appendBubble('assistant', c.trim()));
+-};
++// Split Markdown into chunks ONLY when we're NOT inside code fences.
++// We split on blank lines followed by a heading or a list marker.
++const splitMarkdownOutsideCodeFences = (md) => {
++  if (!md) return [];
++  const lines = md.split(/\r?\n/);
++  const chunks = [];
++  let buf = [];
++  let inFence = false;
++  let fenceChar = null; // ``` or ~~~
++
++  // Helper: should we split BEFORE current line?
++  const shouldSplitBefore = (prevLine, currLine) => {
++    // previous was a blank line and current starts a heading or list item
++    const isPrevBlank = !prevLine || /^\s*$/.test(prevLine);
++    const startsHeading = /^#{1,6}\s/.test(currLine);
++    const startsUl = /^[-*]\s+/.test(currLine);
++    const startsOl = /^(?:\d+)\.\s+/.test(currLine);
++    return isPrevBlank && (startsHeading || startsUl || startsOl);
++  };
++
++  let prevLine = "";
++  for (let i = 0; i < lines.length; i++) {
++    const line = lines[i];
++    const fenceMatch = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
++    if (fenceMatch) {
++      // toggle fence state
++      if (!inFence) {
++        inFence = true;
++        fenceChar = fenceMatch[2][0]; // ` or ~
++      } else {
++        // only close if matching fence char
++        const thisFenceChar = fenceMatch[2][0];
++        if (thisFenceChar === fenceChar) {
++          inFence = false;
++          fenceChar = null;
++        }
++      }
++      buf.push(line);
++      prevLine = line;
++      continue;
++    }
++
++    if (!inFence && shouldSplitBefore(prevLine, line) && buf.length) {
++      chunks.push(buf.join("\n"));
++      buf = [];
++    }
++    buf.push(line);
++    prevLine = line;
++  }
++  if (buf.length) chunks.push(buf.join("\n"));
++  return chunks;
++};
++
++const renderAssistant = (md) => {
++  const chunks = splitMarkdownOutsideCodeFences(md || "");
++  if (chunks.length <= 1) return appendBubble('assistant', md);
++  chunks.forEach(c => c.trim() && appendBubble('assistant', c.trim()));
++};

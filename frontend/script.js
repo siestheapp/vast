@@ -70,9 +70,56 @@ const appendBubble = (role, text) => {
   return wrap;
 };
 
-// Optional: split very long assistant replies into multiple bubbles
+// Split Markdown into chunks ONLY when we're NOT inside code fences.
+const splitMarkdownOutsideCodeFences = (md) => {
+  if (!md) return [];
+  const lines = md.split(/\r?\n/);
+  const chunks = [];
+  let buf = [];
+  let inFence = false;
+  let fenceChar = null; // ``` or ~~~
+
+  const shouldSplitBefore = (prevLine, currLine) => {
+    const isPrevBlank = !prevLine || /^\s*$/.test(prevLine);
+    const startsHeading = /^#{1,6}\s/.test(currLine);
+    const startsUl = /^[-*]\s+/.test(currLine);
+    const startsOl = /^(?:\d+)\.\s+/.test(currLine);
+    return isPrevBlank && (startsHeading || startsUl || startsOl);
+  };
+
+  let prevLine = "";
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fenceMatch = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fenceMatch) {
+      if (!inFence) {
+        inFence = true;
+        fenceChar = fenceMatch[2][0]; // ` or ~
+      } else {
+        const thisFenceChar = fenceMatch[2][0];
+        if (thisFenceChar === fenceChar) {
+          inFence = false;
+          fenceChar = null;
+        }
+      }
+      buf.push(line);
+      prevLine = line;
+      continue;
+    }
+
+    if (!inFence && shouldSplitBefore(prevLine, line) && buf.length) {
+      chunks.push(buf.join("\n"));
+      buf = [];
+    }
+    buf.push(line);
+    prevLine = line;
+  }
+  if (buf.length) chunks.push(buf.join("\n"));
+  return chunks;
+};
+
 const renderAssistant = (md) => {
-  const chunks = (md || '').split(/\n{2,}(?=#+\s|[-*]\s|1\.)/); // split on sections/lists
+  const chunks = splitMarkdownOutsideCodeFences(md || "");
   if (chunks.length <= 1) return appendBubble('assistant', md);
   chunks.forEach(c => c.trim() && appendBubble('assistant', c.trim()));
 };

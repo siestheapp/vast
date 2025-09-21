@@ -1,3 +1,4 @@
+# VAST: patch smoke-test marker (safe to keep or remove)
 """
 VAST Conversation Engine
 A persistent, context-aware database agent that acts as your DBA/CTO

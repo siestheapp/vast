@@ -545,6 +545,13 @@ Remember: You are VAST, with direct database access. Current context:
         # Clear last actions
         self.last_actions = []
         
+        text_lower = user_input.lower()
+        if ("what database" in text_lower) or ("connected to" in text_lower and "database" in text_lower):
+            md = self._render_db_identity_markdown()
+            assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
+            self.messages.append(assistant_msg)
+            self._save_session()
+            return md
         
         # --- Fast paths that MUST be grounded on the live DB -----------------
         text_lower = user_input.lower()
@@ -846,6 +853,45 @@ Remember: You are VAST, with direct database access. Current context:
             fq = f"{r['schema']}.{r['table']}"
             lines.append(f"| {i} | `{fq}` | {fmt_bytes(r['total_bytes'])} | {int(r['approx_rows'])} |")
         return "\n".join(lines)
+
+    # --- Live DB identity (no guessing) ---
+    def _render_db_identity_markdown(self) -> str:
+        sql = """
+        SELECT
+          current_database()               AS database,
+          inet_server_addr()::text         AS host,
+          inet_server_port()               AS port,
+          version()                        AS version
+        """
+        with get_engine(readonly=True).begin() as conn:
+            row = conn.execute(text(sql)).mappings().first()
+        db = row["database"] or "unknown"
+        host = row["host"] or "localhost"
+        port = row["port"]
+        ver = row["version"].split(" on ", 1)[0]
+        return (
+            f"I am connected to **{db}** at **{host}:{port}**.\n\n"
+            f"_PostgreSQL: {ver}_"
+        )
+
+    # --- Grounding enforcement (blocks "typically/likely/usually" on DB facts) ---
+    import re as _re
+    _HEDGES = _re.compile(r"\b(typically|usually|likely|generally|commonly|often|might)\b", _re.I)
+
+    def _is_db_fact_question(self, s: str) -> bool:
+        s = s.lower()
+        return any(k in s for k in [
+            "how many","count","size","largest","biggest","rows","tables","indexes",
+            "what database","connected to","schema","columns","foreign key","table size"
+        ])
+
+    def _enforce_grounding(self, user_input: str, response: str) -> str:
+        if not response:
+            return response
+        if self._is_db_fact_question(user_input) and self._HEDGES.search(response):
+            return ("I need to run a query to determine this.\n\n"
+                    "```sql\n-- VAST will generate and execute the appropriate SELECT against the connected database\n```")
+        return response
 
 
 # Convenience function for CLI

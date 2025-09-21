@@ -10,8 +10,7 @@ idna==3.10
 jiter==0.11.0
 markdown-it-py==4.0.0
 mdurl==0.1.2
-psycopg==3.2.10
-psycopg-binary==3.2.10
+psycopg[binary]==3.2.10
 pydantic==2.11.9
 pydantic_core==2.33.2
 Pygments==2.19.2
@@ -24,6 +23,6 @@ tqdm==4.67.1
 typer==0.18.0
 typing-inspection==0.4.1
 typing_extensions==4.15.0
-openai>=1.0.0
+openai==1.104.2
 fastapi==0.115.2
 uvicorn[standard]==0.30.6

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import service
@@ -51,6 +51,15 @@ class ConversationProcessRequest(BaseModel):
     message: str
     session: Optional[str] = None
     auto_execute: bool = False
+
+
+class KnowledgeRefreshRequest(BaseModel):
+    force: bool = False
+
+
+class KnowledgeSearchRequest(BaseModel):
+    query: str
+    top_k: int = Field(default=5, ge=1, le=25)
 
 
 def create_app() -> FastAPI:
@@ -141,6 +150,35 @@ def create_app() -> FastAPI:
                 "response": resp_text,
                 "actions": conv.last_actions,
             }
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/knowledge/refresh")
+    def refresh_knowledge(payload: KnowledgeRefreshRequest) -> Dict[str, Any]:
+        try:
+            snapshot = service.ensure_knowledge_snapshot(force=payload.force)
+            return snapshot
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/knowledge/snapshots")
+    def knowledge_snapshots(limit: int = Query(default=20, ge=1, le=100)) -> Dict[str, Any]:
+        return {"snapshots": service.list_knowledge_snapshots(limit=limit)}
+
+    @app.get("/knowledge/entries")
+    def knowledge_entries(
+        entry_type: Optional[str] = Query(default=None, description="Filter by entry type"),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> Dict[str, Any]:
+        return {
+            "entries": service.list_knowledge_entries(entry_type=entry_type, limit=limit)
+        }
+
+    @app.post("/knowledge/search")
+    def knowledge_search(payload: KnowledgeSearchRequest) -> Dict[str, Any]:
+        try:
+            results = service.knowledge_search(payload.query, top_k=payload.top_k)
+            return {"results": results}
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

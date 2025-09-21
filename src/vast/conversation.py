@@ -26,6 +26,7 @@ from .introspect import list_tables, table_columns, schema_fingerprint
 from .agent import load_or_build_schema_summary
 from .system_ops import SystemOperations
 from . import service
+from .knowledge import get_knowledge_store
 
 console = Console()
 
@@ -115,6 +116,12 @@ class VastConversation:
             schema_summary=schema_summary,
             last_fingerprint=schema_fingerprint()
         )
+
+        # Capture initial schema snapshot in knowledge store
+        try:
+            get_knowledge_store().capture_schema_snapshot()
+        except Exception as exc:
+            console.print(f"[yellow]Knowledge store snapshot failed: {exc}[/]")
         
         # System message that defines VAST's personality and capabilities
         system_msg = Message(
@@ -188,13 +195,17 @@ You are conversational but professional. You make decisions like a senior engine
         """Update context when database schema changes"""
         self.context.schema_summary = load_or_build_schema_summary()
         self.context.last_fingerprint = schema_fingerprint()
-        
+
         # Add a note about the schema change
         refresh_msg = Message(
             role=MessageRole.SYSTEM,
             content=f"[Schema Update] The database schema has been refreshed:\n{self.context.schema_summary}"
         )
         self.messages.append(refresh_msg)
+        try:
+            get_knowledge_store().capture_schema_snapshot(force=True)
+        except Exception as exc:
+            console.print(f"[yellow]Knowledge store refresh failed: {exc}[/]")
         self._save_session()
     
     def _execute_system_command(self, cmd: str) -> Dict[str, Any]:
@@ -434,7 +445,27 @@ You are conversational but professional. You make decisions like a senior engine
         
         # Add current user input
         api_messages.append({"role": "user", "content": user_input})
-        
+
+        # Add knowledge context if available
+        try:
+            knowledge_entries = get_knowledge_store().search(user_input, top_k=3)
+        except Exception as exc:
+            console.print(f"[yellow]Knowledge search failed: {exc}[/]")
+            knowledge_entries = []
+
+        if knowledge_entries:
+            knowledge_blocks = []
+            for entry in knowledge_entries:
+                knowledge_blocks.append(
+                    f"{entry.title}:\n{entry.content}"
+                )
+            api_messages.append(
+                {
+                    "role": "system",
+                    "content": "Authoritative database knowledge:\n" + "\n\n".join(knowledge_blocks),
+                }
+            )
+
         # Add current context reminder
         context_reminder = f"""
 Remember: You are VAST, with direct database access. Current context:
@@ -447,7 +478,7 @@ Remember: You are VAST, with direct database access. Current context:
         
         # Get response
         response = self.client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=settings.openai_model,
             messages=api_messages,
             temperature=0.3,
             max_tokens=2000

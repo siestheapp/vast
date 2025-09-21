@@ -18,6 +18,7 @@ from .actions import (
     write_text_file,
     apply_sql_file,
 )
+from .knowledge import get_knowledge_store
 
 
 def environment_status() -> Dict[str, Any]:
@@ -26,6 +27,7 @@ def environment_status() -> Dict[str, Any]:
         "database_url_configured": bool(settings.database_url),
         "vast_env": settings.env,
         "openai_configured": bool(settings.openai_api_key),
+        "openai_model": settings.openai_model,
     }
 
 
@@ -154,3 +156,63 @@ def load_conversation(session_name: str) -> Dict[str, Any] | None:
     if not path.exists():
         return None
     return json.loads(path.read_text())
+
+
+# --- Knowledge helpers --------------------------------------------------
+
+
+def ensure_knowledge_snapshot(force: bool = False) -> Dict[str, Any]:
+    store = get_knowledge_store()
+    snapshot = store.capture_schema_snapshot(force=force)
+    return {
+        "id": snapshot.id,
+        "fingerprint": snapshot.fingerprint,
+        "created_at": snapshot.created_at,
+        "summary": snapshot.summary,
+    }
+
+
+def list_knowledge_snapshots(limit: int = 20) -> List[Dict[str, Any]]:
+    store = get_knowledge_store()
+    snaps = store.list_snapshots(limit=limit)
+    return [
+        {
+            "id": snap.id,
+            "fingerprint": snap.fingerprint,
+            "created_at": snap.created_at,
+            "summary": snap.summary,
+        }
+        for snap in snaps
+    ]
+
+
+def knowledge_search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    store = get_knowledge_store()
+    results = store.search(query, top_k=top_k)
+    return [
+        {
+            "id": entry.id,
+            "type": entry.type,
+            "title": entry.title,
+            "content": entry.content,
+            "metadata": entry.metadata,
+            "updated_at": entry.updated_at,
+        }
+        for entry in results
+    ]
+
+
+def list_knowledge_entries(entry_type: str | None = None, limit: int = 50) -> List[Dict[str, Any]]:
+    store = get_knowledge_store()
+    entries = store.list_entries(entry_type=entry_type, limit=limit)
+    return [
+        {
+            "id": entry.id,
+            "type": entry.type,
+            "title": entry.title,
+            "content": entry.content,
+            "metadata": entry.metadata,
+            "updated_at": entry.updated_at,
+        }
+        for entry in entries
+    ]

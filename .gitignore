@@ -40,6 +40,8 @@ env/
 # Project specific
 .vast/
 .specstory/
+desktop/electron/node_modules/
+node_modules/
 *.db
 *.sqlite
 *.sqlite3

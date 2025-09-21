@@ -9,6 +9,7 @@ from rich.console import Console
 from .config import settings
 from .introspect import list_tables, table_columns, schema_fingerprint
 from .db import safe_execute
+from .knowledge import get_knowledge_store
 
 console = Console()
 CACHE_PATH = Path(".vast/schema_cache.json")
@@ -82,6 +83,21 @@ def plan_sql(
         f"Database schema:\n{schema_ctx}",
         f"Task: {nl_request}",
     ]
+
+    # Knowledge retrieval
+    knowledge_entries = []
+    try:
+        store = get_knowledge_store()
+        store.capture_schema_snapshot()
+        knowledge_entries = store.search(nl_request, top_k=3)
+    except Exception as exc:
+        console.print(f"[yellow]Knowledge retrieval failed: {exc}[/]")
+
+    if knowledge_entries:
+        knowledge_text = "\n\n".join(
+            f"{entry.title}:\n{entry.content}" for entry in knowledge_entries
+        )
+        user_blocks.append("Authoritative context:\n" + knowledge_text)
     if param_hints:
         user_blocks.append(
             "Use these named parameters if relevant (do not inline values): "
@@ -95,7 +111,7 @@ def plan_sql(
 
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=settings.openai_model,
             messages=messages,
             temperature=0,
             max_tokens=400,

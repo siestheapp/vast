@@ -76,9 +76,31 @@ ensure_venv() {
   # shellcheck disable=SC1091
   source .venv/bin/activate
   python -m pip install -U pip setuptools wheel >/dev/null
+  local hash_file=".venv/.vast-req.hash"
+  local req_hash=""
   if [ -f requirements.txt ]; then
-    echo "[start] Installing dependencies..."
-    pip install -r requirements.txt >/dev/null
+    req_hash=$(python3 - <<'PY'
+import hashlib, sys
+from pathlib import Path
+path = Path('requirements.txt')
+print(hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+)
+  fi
+
+  local installed_hash=""
+  if [ -f "$hash_file" ]; then
+    installed_hash=$(cat "$hash_file")
+  fi
+
+  if [ -n "$req_hash" ]; then
+    if [ "$req_hash" != "$installed_hash" ]; then
+      echo "[start] Installing dependencies (requirements changed)..."
+      pip install -r requirements.txt >/dev/null
+      echo "$req_hash" > "$hash_file"
+    else
+      echo "[start] Dependencies already satisfied (requirements unchanged)."
+    fi
   fi
 }
 
@@ -99,5 +121,4 @@ print_receipt
 
 echo "[start] Launching VAST (Ctrl+C to exit)"
 exec python start_vast.py
-
 

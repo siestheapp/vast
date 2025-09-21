@@ -28,6 +28,12 @@ from .system_ops import SystemOperations
 from . import service
 from .knowledge import get_knowledge_store
 
+# Ensure we can access the engine with fallback
+try:
+    from .db import get_engine  # if this file is in a package
+except Exception:
+    from db import get_engine   # if db.py is at repo root
+
 console = Console()
 
 # Conversation storage path
@@ -800,6 +806,46 @@ Remember: You are VAST, with direct database access. Current context:
         self.context.design_decisions.append(decision)
         self._save_session()
         console.print(f"[green]✓ Design decision recorded: {decision}[/]")
+
+    # ------------------------ Grounded helpers -------------------------------
+    def _biggest_tables(self, limit: int = 10):
+        """Return largest tables by total size using pg_total_relation_size."""
+        sql = """
+        SELECT
+          n.nspname AS schema,
+          c.relname AS table,
+          pg_total_relation_size(c.oid) AS total_bytes,
+          pg_relation_size(c.oid)      AS table_bytes,
+          COALESCE(pg_stat_get_live_tuples(c.oid), 0) AS approx_rows
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'r'
+        ORDER BY pg_total_relation_size(c.oid) DESC
+        LIMIT :limit;
+        """
+        with get_engine(readonly=True).begin() as conn:
+            rows = conn.execute(text(sql), {"limit": limit}).mappings().all()
+        return rows
+
+    def _render_biggest_tables_markdown(self, rows) -> str:
+        def fmt_bytes(b):
+            units = ["B","KB","MB","GB","TB","PB"]
+            i = 0
+            b = float(b or 0)
+            while b >= 1024 and i < len(units)-1:
+                b /= 1024.0
+                i += 1
+            return f"{b:.0f} {units[i]}"
+        lines = [
+            "Here are the largest tables **in the connected database** (by total size):",
+            "",
+            "| # | schema.table | size | rows |",
+            "|---|--------------|------|------|",
+        ]
+        for i, r in enumerate(rows, 1):
+            fq = f"{r['schema']}.{r['table']}"
+            lines.append(f"| {i} | `{fq}` | {fmt_bytes(r['total_bytes'])} | {int(r['approx_rows'])} |")
+        return "\n".join(lines)
 
 
 # Convenience function for CLI

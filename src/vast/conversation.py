@@ -545,6 +545,17 @@ Remember: You are VAST, with direct database access. Current context:
         # Clear last actions
         self.last_actions = []
         
+        # --- Grounded health report intent -----------------------------------------
+        t = user_input.lower()
+        if any(k in t for k in ["improv", "optimiz", "performance", "speed up", "slow queries", "health report"]):
+            report = self._db_health_report()
+            md = self._render_db_health_markdown(report)
+            assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
+            self.messages.append(assistant_msg)
+            self._save_session()
+            return md
+        # ---------------------------------------------------------------------------
+        
         # --- Fast paths that MUST be grounded on the live DB -----------------
         text_lower = user_input.lower()
         need_identity = ("what database" in text_lower) or ("connected to" in text_lower and "database" in text_lower)
@@ -874,6 +885,168 @@ Remember: You are VAST, with direct database access. Current context:
             f"I am connected to **{db}** at **{host}:{port}**.\n\n"
             f"_PostgreSQL: {ver}_"
         )
+
+    def _db_health_report(self):
+        """
+        Collect high-signal read-only diagnostics from Postgres.
+        Returns a dict of result lists. All queries run against the connected DB.
+        """
+        out = {}
+        with get_engine(readonly=True).begin() as conn:
+            # Largest tables by total size
+            out["largest_tables"] = conn.execute(text("""
+                SELECT
+                  n.nspname AS schema,
+                  c.relname AS table,
+                  pg_total_relation_size(c.oid) AS total_bytes,
+                  COALESCE(pg_stat_get_live_tuples(c.oid), 0) AS approx_rows
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind = 'r'
+                ORDER BY pg_total_relation_size(c.oid) DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            # Tables with heavy seq scans (likely missing/weak indexes)
+            out["seq_scan_heavy"] = conn.execute(text("""
+                SELECT
+                  relname AS table,
+                  seq_scan,
+                  idx_scan,
+                  n_live_tup
+                FROM pg_stat_user_tables
+                ORDER BY seq_scan DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            # Unused or rarely used indexes (idx_scan = 0)
+            out["unused_indexes"] = conn.execute(text("""
+                SELECT
+                  s.relname AS table,
+                  i.indexrelname AS index,
+                  pg_relation_size(i.indexrelid) AS index_bytes,
+                  COALESCE(x.idx_scan, 0) AS idx_scan
+                FROM pg_class c
+                JOIN pg_index i ON i.indrelid = c.oid
+                JOIN pg_class ic ON ic.oid = i.indexrelid
+                JOIN pg_stat_user_indexes x ON x.indexrelid = i.indexrelid
+                JOIN pg_stat_user_tables s ON s.relid = c.oid
+                WHERE x.idx_scan = 0
+                ORDER BY pg_relation_size(i.indexrelid) DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            # Dead tuples (vacuum pressure)
+            out["dead_tuples"] = conn.execute(text("""
+                SELECT
+                  relname AS table,
+                  n_live_tup,
+                  n_dead_tup
+                FROM pg_stat_user_tables
+                WHERE n_dead_tup > 0
+                ORDER BY n_dead_tup DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            # Cache hit ratio (overall)
+            out["cache_hit"] = conn.execute(text("""
+                SELECT
+                  ROUND(100.0 * SUM(blks_hit) / NULLIF(SUM(blks_hit + blks_read),0), 2) AS cache_hit_pct
+                FROM pg_stat_database
+            """)).mappings().first()
+
+            # Autovacuum key settings (for visibility & tuning)
+            out["autovacuum_settings"] = conn.execute(text("""
+                SELECT name, setting
+                FROM pg_settings
+                WHERE name IN (
+                  'autovacuum', 'autovacuum_naptime', 'autovacuum_vacuum_scale_factor',
+                  'autovacuum_analyze_scale_factor', 'autovacuum_vacuum_threshold',
+                  'autovacuum_analyze_threshold'
+                )
+                ORDER BY name
+            """)).mappings().all()
+
+        return out
+
+    def _render_db_health_markdown(self, r) -> str:
+        def fmt_bytes(b):
+            units = ["B","KB","MB","GB","TB","PB"]; i=0; b=float(b or 0)
+            while b>=1024 and i<len(units)-1: b/=1024.0; i+=1
+            return f"{b:.0f} {units[i]}"
+
+        lines = []
+
+        # Summary bullets (prioritized)
+        cache = r.get("cache_hit", {}) or {}
+        cache_pct = cache.get("cache_hit_pct")
+        if cache_pct is not None:
+            lines.append(f"**Buffer cache hit ratio:** {cache_pct}%")
+
+        if r["seq_scan_heavy"]:
+            t = r["seq_scan_heavy"][0]
+            lines.append(f"**High seq scans:** `{t['table']}` (seq_scan={t['seq_scan']}, idx_scan={t['idx_scan']}) → likely index gaps.")
+
+        if r["dead_tuples"]:
+            dt = r["dead_tuples"][0]
+            lines.append(f"**Dead tuples pressure:** `{dt['table']}` has {dt['n_dead_tup']} dead vs {dt['n_live_tup']} live tuples → vacuum/auto-vacuum tuning.")
+
+        lines.append("")
+        lines.append("### Largest tables (by size)")
+        lines.append("| # | table | size | approx_rows |")
+        lines.append("|---|-------|------|-------------|")
+        for i, row in enumerate(r["largest_tables"], 1):
+            fq = f"{row['schema']}.{row['table']}"
+            lines.append(f"| {i} | `{fq}` | {fmt_bytes(row['total_bytes'])} | {int(row['approx_rows'])} |")
+
+        if r["seq_scan_heavy"]:
+            lines.append("")
+            lines.append("### Tables with heavy sequential scans")
+            lines.append("| table | seq_scan | idx_scan | live_rows |")
+            lines.append("|-------|----------|----------|-----------|")
+            for row in r["seq_scan_heavy"]:
+                lines.append(f"| `{row['table']}` | {row['seq_scan']} | {row['idx_scan']} | {row['n_live_tup']} |")
+
+        if r["unused_indexes"]:
+            lines.append("")
+            lines.append("### Unused / rarely used indexes (idx_scan = 0)")
+            lines.append("| table | index | size | idx_scan |")
+            lines.append("|-------|-------|------|----------|")
+            for row in r["unused_indexes"]:
+                lines.append(f"| `{row['table']}` | `{row['index']}` | {fmt_bytes(row['index_bytes'])} | {row['idx_scan']} |")
+
+        if r["dead_tuples"]:
+            lines.append("")
+            lines.append("### Dead tuples (vacuum pressure)")
+            lines.append("| table | dead_tup | live_tup |")
+            lines.append("|-------|----------|----------|")
+            for row in r["dead_tuples"]:
+                lines.append(f"| `{row['table']}` | {row['n_dead_tup']} | {row['n_live_tup']} |")
+
+        if r["autovacuum_settings"]:
+            lines.append("")
+            lines.append("### Autovacuum settings (current)")
+            lines.append("| name | value |")
+            lines.append("|------|-------|")
+            for s in r["autovacuum_settings"]:
+                lines.append(f"| `{s['name']}` | `{s['setting']}` |")
+
+        # Actionable recommendations tied to evidence
+        recs = []
+        if r["seq_scan_heavy"]:
+            recs.append("Add/verify indexes for the high **seq_scan** tables above (start with the top 3).")
+        if r["unused_indexes"]:
+            recs.append("Drop or justify **unused indexes** (idx_scan=0) after verifying in production traffic.")
+        if r["dead_tuples"]:
+            recs.append("Tune **autovacuum** and schedule manual `VACUUM (VERBOSE, ANALYZE)` for the top dead-tuple tables.")
+        if cache_pct is not None and cache_pct < 95:
+            recs.append("Cache hit ratio <95%: review working-set size, increase memory, or optimize repeated scans.")
+
+        if recs:
+            lines.insert(0, "#### Recommended next steps (based on live metrics)")
+            lines.insert(1, "\n".join([f"- {x}" for x in recs]) + "\n")
+
+        return "\n".join(lines)
 
     # --- Grounding enforcement (blocks "typically/likely/usually" on DB facts) ---
     import re as _re

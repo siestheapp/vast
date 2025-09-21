@@ -1,0 +1,4 @@
+#!/bin/bash
+# VAST Desktop App Launcher
+cd "$(dirname "$0")"
+npm --prefix desktop/electron start

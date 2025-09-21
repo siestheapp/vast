@@ -6,6 +6,24 @@ const state = {
   }
 };
 
+const formatTime = (date = new Date()) =>
+  date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+const lastConnected = $('#lastConnected');
+const lastResponse = $('#lastResponse');
+const envLabel = $('#envLabel');
+
+const setStatus = (variant, message) => {
+  const node = $('#healthStatus');
+  node.className = 'status-pill status-idle';
+  node.textContent = message;
+  if (variant === 'ok') {
+    node.classList.add('status-ok');
+  } else if (variant === 'error') {
+    node.classList.add('status-error');
+  }
+};
+
 const renderJSON = (node, value) => {
   node.textContent = JSON.stringify(value, null, 2);
 };
@@ -42,6 +60,7 @@ const appendBubble = (role, text) => {
   const wrap = document.createElement('div');
   wrap.className = `bubble ${role}`;
   wrap.textContent = text;
+  wrap.dataset.meta = `${role === 'user' ? 'You' : 'VAST'} • ${formatTime()}`;
   $('#chatMessages').appendChild(wrap);
   $('#chatMessages').scrollTop = $('#chatMessages').scrollHeight;
 };
@@ -58,6 +77,9 @@ const sendChat = async () => {
       body: JSON.stringify({ message: msg, auto_execute: true }),
     });
     appendBubble('assistant', data.response || '');
+    if (lastResponse) {
+      lastResponse.textContent = formatTime();
+    }
   } catch (err) {
     appendBubble('assistant', `Error: ${err.message || String(err)}`);
   }
@@ -72,13 +94,15 @@ $('#chatText').addEventListener('keydown', (e) => {
 });
 
 $('#checkHealth').addEventListener('click', async () => {
-  const statusNode = $('#healthStatus');
-  statusNode.textContent = 'Checking…';
+  setStatus('idle', 'Checking…');
   try {
     const data = await request('/health', { method: 'GET' });
-    statusNode.textContent = `OK (env=${data.environment.vast_env || 'unset'})`;
+    const env = data.environment?.vast_env || 'unset';
+    setStatus('ok', `Connected · ${env}`);
+    if (envLabel) envLabel.textContent = env;
+    if (lastConnected) lastConnected.textContent = formatTime();
   } catch (err) {
-    statusNode.textContent = 'Error';
+    setStatus('error', 'Connection error');
     console.error(err);
   }
 });
@@ -93,6 +117,9 @@ $('#askSubmit').addEventListener('click', async () => {
       body: JSON.stringify({ message, auto_execute: true }),
     });
     output.textContent = data.response || '';
+    if (lastResponse) {
+      lastResponse.textContent = formatTime();
+    }
   } catch (err) {
     handleError(output, err);
   }
@@ -113,6 +140,9 @@ $('#sqlSubmit').addEventListener('click', async () => {
       body: JSON.stringify(payload),
     });
     renderJSON(output, data);
+    if (lastResponse) {
+      lastResponse.textContent = formatTime();
+    }
   } catch (err) {
     handleError(output, err);
   }

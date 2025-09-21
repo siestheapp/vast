@@ -7,72 +7,159 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header>
-    <h1>Vast1 Operator Console</h1>
-    <div class="connection">
-      <label for="apiBase">API base URL:</label>
-      <input id="apiBase" type="text" value="http://localhost:8000">
-      <button id="checkHealth">Check Health</button>
-      <span id="healthStatus"></span>
-    </div>
-  </header>
-
-  <main>
-    <section>
-      <h2>Chat</h2>
-      <div id="chat" class="chat">
-        <div id="chatMessages" class="chat-messages"></div>
-        <div class="chat-input">
-          <input id="chatText" type="text" placeholder="Type a message and press Enter" />
-          <button id="chatSend">Send</button>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark">VAST</div>
+        <div class="brand-copy">
+          <h1>Operator Console</h1>
+          <p>Autonomous database operations</p>
         </div>
       </div>
-    </section>
-
-    <section>
-      <h2>Ask the Agent</h2>
-      <textarea id="askInput" rows="4" placeholder="Ask a question about the database..."></textarea>
-      <div class="options">
-        <label><input type="checkbox" id="askAllowWrites"> Allow writes</label>
-        <label><input type="checkbox" id="askForceWrite"> Force write</label>
-        <label><input type="checkbox" id="askRefreshSchema"> Refresh schema</label>
-        <label><input type="checkbox" id="askRetry" checked> Retry on failure</label>
-        <label>Max retries <input type="number" id="askMaxRetries" value="2" min="0" max="5"></label>
+      <div class="topbar-actions">
+        <label class="field-label" for="apiBase">API base URL</label>
+        <div class="field-group">
+          <input id="apiBase" type="text" value="http://localhost:8000">
+          <button id="checkHealth">Check Health</button>
+        </div>
+        <span id="healthStatus" class="status-pill status-idle">Not connected</span>
       </div>
-      <textarea id="askParams" rows="2" placeholder='JSON params e.g. {"limit": 5}'></textarea>
-      <button id="askSubmit">Submit</button>
-      <pre id="askResult"></pre>
-    </section>
+    </header>
 
-    <section>
-      <h2>Run SQL</h2>
-      <textarea id="sqlInput" rows="4" placeholder="SELECT * FROM public.actor LIMIT 5"></textarea>
-      <div class="options">
-        <label><input type="checkbox" id="sqlAllowWrites"> Allow writes</label>
-        <label><input type="checkbox" id="sqlForceWrite"> Force write</label>
-      </div>
-      <textarea id="sqlParams" rows="2" placeholder='JSON params e.g. {"limit": 5}'></textarea>
-      <button id="sqlSubmit">Execute</button>
-      <pre id="sqlResult"></pre>
-    </section>
+    <div class="app-body">
+      <aside class="sidebar">
+        <section class="sidebar-card">
+          <h2>Workspace</h2>
+          <ul class="nav-list">
+            <li class="active">Chat</li>
+            <li>Operations</li>
+            <li>Schema</li>
+            <li>Artifacts</li>
+            <li>Audit Log</li>
+          </ul>
+        </section>
+        <section class="sidebar-card">
+          <h2>Session Summary</h2>
+          <dl class="meta">
+            <div>
+              <dt>Environment</dt>
+              <dd><span id="envLabel">dev</span></dd>
+            </div>
+            <div>
+              <dt>Connected</dt>
+              <dd><span id="lastConnected">—</span></dd>
+            </div>
+            <div>
+              <dt>Last response</dt>
+              <dd><span id="lastResponse">—</span></dd>
+            </div>
+          </dl>
+        </section>
+      </aside>
 
-    <section>
-      <h2>Schema</h2>
-      <button id="loadTables">Load Tables</button>
-      <ul id="tablesList" class="list"></ul>
-      <div id="columnsView"></div>
-    </section>
+      <main class="workspace">
+        <div class="workspace-grid">
+          <section class="card chat-card span-7 span-md-12">
+            <header class="card-header">
+              <div>
+                <h2>Chat</h2>
+                <p>Converse with VAST and review execution details in one stream.</p>
+              </div>
+            </header>
+            <div class="card-body">
+              <div id="chat" class="chat">
+                <div id="chatMessages" class="chat-messages"></div>
+                <form class="chat-input" onsubmit="return false;">
+                  <input id="chatText" type="text" placeholder="Type a message and press Enter" />
+                  <button id="chatSend" type="button">Send</button>
+                </form>
+              </div>
+            </div>
+          </section>
 
-    <section>
-      <h2>Artifacts</h2>
-      <button id="loadArtifacts">Refresh Artifacts</button>
-      <ul id="artifactsList" class="list"></ul>
-    </section>
-  </main>
+          <section class="card span-5 span-md-12">
+            <header class="card-header">
+              <div>
+                <h2>Ask the Agent</h2>
+                <p>Generate SQL or plans from natural language prompts.</p>
+              </div>
+            </header>
+            <div class="card-body">
+              <textarea id="askInput" rows="4" placeholder="Ask a question about the database..."></textarea>
+              <div class="options">
+                <label><input type="checkbox" id="askAllowWrites"> Allow writes</label>
+                <label><input type="checkbox" id="askForceWrite"> Force write</label>
+                <label><input type="checkbox" id="askRefreshSchema"> Refresh schema</label>
+                <label><input type="checkbox" id="askRetry" checked> Retry on failure</label>
+                <label>Max retries <input type="number" id="askMaxRetries" value="2" min="0" max="5"></label>
+              </div>
+              <textarea id="askParams" rows="2" placeholder='JSON params e.g. {"limit": 5}'></textarea>
+              <div class="button-row">
+                <button id="askSubmit">Submit</button>
+              </div>
+              <pre id="askResult"></pre>
+            </div>
+          </section>
 
-  <footer>
-    <p>Frontend prototype – communicates with Vast1 FastAPI backend.</p>
-  </footer>
+          <section class="card span-5 span-md-12">
+            <header class="card-header">
+              <div>
+                <h2>Run SQL</h2>
+                <p>Execute parameterized statements with guardrails and audit trail.</p>
+              </div>
+            </header>
+            <div class="card-body">
+              <textarea id="sqlInput" rows="4" placeholder="SELECT * FROM public.actor LIMIT 5"></textarea>
+              <div class="options">
+                <label><input type="checkbox" id="sqlAllowWrites"> Allow writes</label>
+                <label><input type="checkbox" id="sqlForceWrite"> Force write</label>
+              </div>
+              <textarea id="sqlParams" rows="2" placeholder='JSON params e.g. {"limit": 5}'></textarea>
+              <div class="button-row">
+                <button id="sqlSubmit">Execute</button>
+              </div>
+              <pre id="sqlResult"></pre>
+            </div>
+          </section>
+
+          <section class="card span-4 span-md-12">
+            <header class="card-header">
+              <div>
+                <h2>Schema</h2>
+                <p>Browse structures and drill into table metadata.</p>
+              </div>
+            </header>
+            <div class="card-body">
+              <div class="button-row">
+                <button id="loadTables">Load Tables</button>
+              </div>
+              <ul id="tablesList" class="list"></ul>
+              <div id="columnsView" class="panel"></div>
+            </div>
+          </section>
+
+          <section class="card span-4 span-md-12">
+            <header class="card-header">
+              <div>
+                <h2>Artifacts</h2>
+                <p>Inspect generated dumps and other outputs.</p>
+              </div>
+            </header>
+            <div class="card-body">
+              <div class="button-row">
+                <button id="loadArtifacts">Refresh Artifacts</button>
+              </div>
+              <ul id="artifactsList" class="list"></ul>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <footer class="footer">
+      <p>Frontend prototype · connected to Vast1 FastAPI backend.</p>
+    </footer>
+  </div>
 
   <script src="script.js"></script>
 </body>

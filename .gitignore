@@ -39,6 +39,7 @@ env/
 
 # Project specific
 .vast/
+.specstory/
 *.db
 *.sqlite
 *.sqlite3

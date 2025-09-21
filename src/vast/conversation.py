@@ -545,36 +545,37 @@ Remember: You are VAST, with direct database access. Current context:
         # Clear last actions
         self.last_actions = []
         
-        # --- Grounded health report intent -----------------------------------------
+        # --- Strict DB-fact routing (grounded only) ---------------------------------
         t = user_input.lower()
-        if any(k in t for k in ["improv", "optimiz", "performance", "speed up", "slow queries", "health report"]):
-            report = self._db_health_report()
-            md = self._render_db_health_markdown(report)
-            assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
-            self.messages.append(assistant_msg)
-            self._save_session()
-            return md
-        # ---------------------------------------------------------------------------
-        
-        # --- Fast paths that MUST be grounded on the live DB -----------------
-        text_lower = user_input.lower()
-        need_identity = ("what database" in text_lower) or ("connected to" in text_lower and "database" in text_lower)
-        need_biggest = ("biggest tables" in text_lower) or ("largest" in text_lower and "tables" in text_lower)
-
-        if need_identity or need_biggest:
+        DB_FACT_TRIGGERS = (
+            "how many", "count", "size", "largest", "biggest", "rows",
+            "tables", "indexes", "connected to", "what database", "schema",
+            "columns", "foreign key", "slow queries", "optimiz", "improv",
+        )
+        if any(k in t for k in DB_FACT_TRIGGERS):
             sections = []
-            if need_identity:
+
+            # identity
+            if ("what database" in t) or ("connected to" in t and "database" in t):
                 sections.append(self._render_db_identity_markdown())
-            if need_biggest:
+
+            # largest tables
+            if ("biggest tables" in t) or ("largest" in t and "tables" in t):
                 rows = self._biggest_tables(limit=10)
                 sections.append(self._render_biggest_tables_markdown(rows))
 
-            md = "\n\n---\n\n".join(sections)  # nice visual break
-            assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
-            self.messages.append(assistant_msg)
-            self._save_session()
-            return md
-        # ---------------------------------------------------------------------
+            # health report / optimization
+            if any(k in t for k in ("improv", "optimiz", "performance", "slow queries", "health report")):
+                report = self._db_health_report()     # runs real queries
+                sections.append(self._render_db_health_markdown(report))
+
+            if sections:
+                md = "\n\n---\n\n".join(sections)
+                assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
+                self.messages.append(assistant_msg)
+                self._save_session()
+                return md
+        # ---------------------------------------------------------------------------
 
 # MVP: auto-execute dump requests without waiting for the model
         if re.search(r"\b(sql\s+dump|database\s+dump|\bdump\b|\bbackup\b|\bexport\b)", user_input, re.I):
@@ -742,6 +743,15 @@ Remember: You are VAST, with direct database access. Current context:
         self._extract_context_updates(response)
         
         # Add assistant response to history
+        if self._is_db_fact_question(user_input) and not self._grounding_evidence_present_this_turn():
+            # refuse generic answer and force a query proposal
+            response = ("I need to run a query to determine this.\n\n"
+                        "```sql\n-- I will generate and execute the appropriate SELECT against the connected database\n```")
+
+        # Optional: block hedgy language on DB facts
+        if self._is_db_fact_question(user_input) and self._HEDGES.search(response or ""):
+            response = response.replace("typically", "").replace("usually", "").replace("likely", "")
+
         response = self._enforce_grounding(user_input, response)
         assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)
         self.messages.append(assistant_msg)
@@ -1050,14 +1060,20 @@ Remember: You are VAST, with direct database access. Current context:
 
     # --- Grounding enforcement (blocks "typically/likely/usually" on DB facts) ---
     import re as _re
-    _HEDGES = _re.compile(r"\b(typically|usually|likely|generally|commonly|often|might)\b", _re.I)
+    _HEDGES = _re.compile(r"\b(typically|usually|likely|generally|commonly|often|might|may)\b", _re.I)
 
     def _is_db_fact_question(self, s: str) -> bool:
         s = s.lower()
         return any(k in s for k in [
             "how many","count","size","largest","biggest","rows","tables","indexes",
-            "what database","connected to","schema","columns","foreign key","table size"
+            "what database","connected to","schema","columns","foreign key","slow queries","optimiz","improv"
         ])
+
+    def _grounding_evidence_present_this_turn(self) -> bool:
+        # Minimal: if any of our grounded helpers ran, we would have pushed an action
+        # or you can track a flag when you call get_engine/execute in this turn.
+        return any(a.get("type") in {"sql_query","health_report","biggest_tables","db_identity"}
+                   for a in (self.last_actions or []))
 
     def _enforce_grounding(self, user_input: str, response: str) -> str:
         if not response:

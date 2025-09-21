@@ -74,7 +74,7 @@ def _classify_statement(expr: exp.Expression) -> StatementType:
             return StatementType.WRITE
         return StatementType.DDL
 
-    if isinstance(expr, (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Copy, exp.LoadData)):
+    if isinstance(expr, (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.LoadData)):
         return StatementType.WRITE
 
     if isinstance(expr, exp.Select):

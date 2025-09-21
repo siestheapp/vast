@@ -12,14 +12,14 @@ def test_classifies_with_update_cte():
 
 def test_blocks_ddl():
     with pytest.raises(ValueError):
-        safe_execute("DROP TABLE users")
+        safe_execute("DROP TABLE actor")
 
 def test_write_requires_flag():
     with pytest.raises(ValueError):
-        safe_execute("UPDATE users SET active = false")
+        safe_execute("UPDATE actor SET first_name = 'test'")
 
 def test_dry_run_when_not_forced():
-    out = safe_execute("UPDATE users SET active=false WHERE id < 10", allow_writes=True, force_write=False)
+    out = safe_execute("UPDATE actor SET first_name='test' WHERE actor_id < 10", allow_writes=True, force_write=False)
     assert out and out[0]["_notice"].startswith("DRY RUN")
 
 def test_row_estimate_gate(monkeypatch):
@@ -27,4 +27,4 @@ def test_row_estimate_gate(monkeypatch):
     import src.vast.db as db
     monkeypatch.setattr(db, "_estimate_write_rows", lambda *_: settings.max_write_rows + 1)
     with pytest.raises(ValueError):
-        safe_execute("UPDATE users SET active=false", allow_writes=True, force_write=True)
+        safe_execute("UPDATE actor SET first_name='test'", allow_writes=True, force_write=True)

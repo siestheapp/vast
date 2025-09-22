@@ -1271,10 +1271,15 @@ def _ensure_ops_plan_sections(response: str) -> str:
                 out += "\n\n"
             out += f"{heading}\n{default}"
             lower = out.lower()
-    if "schema" not in lower and "ddl" not in lower:
-        out = out.replace(
-            "Plan:\n",
-            "Plan:\n- Highlight schema/DDL changes required\n",
-            1,
-        )
-    return out
+    return _ensure_schema_reference(out)
+
+
+def _ensure_schema_reference(text: str) -> str:
+    if re.search(r"(?i)(schema|ddl)", text):
+        return text
+    match = re.search(r"(?im)^\s*plan[:\-\s].*\n", text)
+    if match:
+        insert_at = match.end()
+        return text[:insert_at] + "- Highlight schema/DDL changes required\n" + text[insert_at:]
+    prefix = "Plan:\n- Highlight schema/DDL changes required\n\n"
+    return prefix + text

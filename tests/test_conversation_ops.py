@@ -18,7 +18,12 @@ def test_ops_plan_includes_standard_headings(monkeypatch, tmp_path):
     conv._save_session = lambda: None
 
     def fake_llm(self, _):
-        return "We should introduce a new attribute and backfill data accordingly."
+        return (
+            "Plan - Roll out the new attribute across stores\n"
+            "Staging - Populate staging tables first\n"
+            "Validation - Compare counts\n"
+            "Rollback - Drop staging tables if needed"
+        )
 
     conv._get_llm_response = MethodType(fake_llm, conv)
 

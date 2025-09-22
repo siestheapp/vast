@@ -1,0 +1,42 @@
+[
+  {
+    "name": "db_identity_and_table_count",
+    "prompt": "what database are you connected to and how many tables does it have",
+    "passed": false,
+    "failures": [
+      "exception: HTTPConnectionPool(host='localhost', port=8010): Max retries exceeded with url: /api/conversations/process (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x106be6900>: Failed to establish a new connection: [Errno 61] Connection refused'))"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  },
+  {
+    "name": "db_size_pronoun",
+    "prompt": "how large is it",
+    "passed": false,
+    "failures": [
+      "exception: HTTPConnectionPool(host='localhost', port=8010): Max retries exceeded with url: /api/conversations/process (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x106c1a350>: Failed to establish a new connection: [Errno 61] Connection refused'))"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  },
+  {
+    "name": "db_identity_and_size",
+    "prompt": "what database are you connected to and how large is it",
+    "passed": false,
+    "failures": [
+      "exception: HTTPConnectionPool(host='localhost', port=8010): Max retries exceeded with url: /api/conversations/process (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x106c1ad50>: Failed to establish a new connection: [Errno 61] Connection refused'))"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  },
+  {
+    "name": "ops_add_attribute_plan",
+    "prompt": "we need to start tracking fabric composition for shirts; propose a plan and backfill approach",
+    "passed": false,
+    "failures": [
+      "exception: HTTPConnectionPool(host='localhost', port=8010): Max retries exceeded with url: /api/conversations/process (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x106b9a9e0>: Failed to establish a new connection: [Errno 61] Connection refused'))"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  }
+]

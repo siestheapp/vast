@@ -1,0 +1,42 @@
+[
+  {
+    "name": "db_identity_and_table_count",
+    "prompt": "what database are you connected to and how many tables does it have",
+    "passed": false,
+    "failures": [
+      "exception: 422 Client Error: Unprocessable Content for url: http://localhost:8000/conversations/process"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  },
+  {
+    "name": "db_size_pronoun",
+    "prompt": "how large is it",
+    "passed": false,
+    "failures": [
+      "exception: 422 Client Error: Unprocessable Content for url: http://localhost:8000/conversations/process"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  },
+  {
+    "name": "db_identity_and_size",
+    "prompt": "what database are you connected to and how large is it",
+    "passed": false,
+    "failures": [
+      "exception: 422 Client Error: Unprocessable Content for url: http://localhost:8000/conversations/process"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  },
+  {
+    "name": "ops_add_attribute_plan",
+    "prompt": "we need to start tracking fabric composition for shirts; propose a plan and backfill approach",
+    "passed": false,
+    "failures": [
+      "exception: 422 Client Error: Unprocessable Content for url: http://localhost:8000/conversations/process"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  }
+]

@@ -1,0 +1,139 @@
+[
+  {
+    "name": "db_identity_and_table_count",
+    "prompt": "what database are you connected to and how many tables does it have",
+    "passed": true,
+    "failures": [],
+    "response_excerpt": "- Database: `pagila` (PostgreSQL PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1)) at `•••:•••/•••:•••`\n- User tables: 29 (excludes pg_catalog, information_schema)\n_Source: facts (identity live SQL; table count cache)._",
+    "raw_response": {
+      "session": "desktop",
+      "response": "- Database: `pagila` (PostgreSQL PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1)) at `•••:•••/•••:•••`\n- User tables: 29 (excludes pg_catalog, information_schema)\n_Source: facts (identity live SQL; table count cache)._",
+      "actions": [
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "db_identity",
+          "sql": "SELECT\n  current_database()               AS database,\n  inet_server_addr()::text         AS host,\n  inet_server_port()               AS port,\n  version()                        AS version",
+          "rows": [
+            {
+              "database": "pagila",
+              "host": "172.17.0.2/32",
+              "port": 5432,
+              "version": "PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+            }
+          ],
+          "source": "facts"
+        },
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "table_count",
+          "sql": "SELECT COUNT(*) AS table_count\nFROM information_schema.tables\nWHERE table_type = 'BASE TABLE'\n  AND table_schema NOT IN ('pg_catalog','information_schema','pg_toast');",
+          "rows": [
+            {
+              "table_count": 29
+            }
+          ],
+          "source": "facts"
+        }
+      ],
+      "payload_mode": "message",
+      "meta": {
+        "payload_mode": "message"
+      }
+    }
+  },
+  {
+    "name": "db_size_pronoun",
+    "prompt": "how large is it",
+    "passed": true,
+    "failures": [],
+    "response_excerpt": "Database size: **17 MB** (17461731 bytes).\n_Source: facts (live SQL)._",
+    "raw_response": {
+      "session": "desktop",
+      "response": "Database size: **17 MB** (17461731 bytes).\n_Source: facts (live SQL)._",
+      "actions": [
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "db_size",
+          "sql": "SELECT\n  pg_database_size(current_database())                 AS size_bytes,\n  pg_size_pretty(pg_database_size(current_database())) AS size_pretty",
+          "rows": [
+            {
+              "size_bytes": 17461731,
+              "size_pretty": "17 MB"
+            }
+          ],
+          "source": "facts+live-sql"
+        }
+      ],
+      "payload_mode": "message",
+      "meta": {
+        "payload_mode": "message"
+      }
+    }
+  },
+  {
+    "name": "db_identity_and_size",
+    "prompt": "what database are you connected to and how large is it",
+    "passed": true,
+    "failures": [],
+    "response_excerpt": "Connected to `pagila` at `•••:•••/•••:•••` (PostgreSQL PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1)).\n_Source: facts (live SQL)._\n\nDatabase size: **17 MB** (17461731 bytes).\n_Source: facts (live SQL)._",
+    "raw_response": {
+      "session": "desktop",
+      "response": "Connected to `pagila` at `•••:•••/•••:•••` (PostgreSQL PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1)).\n_Source: facts (live SQL)._\n\nDatabase size: **17 MB** (17461731 bytes).\n_Source: facts (live SQL)._",
+      "actions": [
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "db_identity",
+          "sql": "SELECT\n  current_database()               AS database,\n  inet_server_addr()::text         AS host,\n  inet_server_port()               AS port,\n  version()                        AS version",
+          "rows": [
+            {
+              "database": "pagila",
+              "host": "172.17.0.2/32",
+              "port": 5432,
+              "version": "PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+            }
+          ],
+          "source": "facts"
+        },
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "db_size",
+          "sql": "SELECT\n  pg_database_size(current_database())                 AS size_bytes,\n  pg_size_pretty(pg_database_size(current_database())) AS size_pretty",
+          "rows": [
+            {
+              "size_bytes": 17461731,
+              "size_pretty": "17 MB"
+            }
+          ],
+          "source": "facts+live-sql"
+        }
+      ],
+      "payload_mode": "message",
+      "meta": {
+        "payload_mode": "message"
+      }
+    }
+  },
+  {
+    "name": "ops_add_attribute_plan",
+    "prompt": "we need to start tracking fabric composition for shirts; propose a plan and backfill approach",
+    "passed": false,
+    "failures": [
+      "missing substring: \"schema\""
+    ],
+    "response_excerpt": "To start tracking fabric composition for shirts, we can implement a structured plan that includes defining the necessary data model, updating existing processes, and backfilling historical data. Here’s a proposed plan:\n\n### 1. Define Data Model\n\n#### New Table: `shirt_fabric_composition`\nCreate a new table to store fabric composition details for shirts.\n\n**Table Structure:**\n```sql\nCREATE TABLE shirt_fabric_composition (\n    shirt_id SERIAL PRIMARY KEY,\n    fabric_type VARCHAR(100) NOT NULL,\n    composition_percentage DECIMAL(5, 2) NOT NULL CHECK (composition_percentage >= 0 AND composition_percentage <= 100),\n    last_update TIMESTAMP NOT NULL DEFAULT now()\n);\n```\n\n### 2. Update Existing Processes\n\n#### a. Modify Shirt Entry Process\n- Update the shirt entry form/process to include fields for fabric type and composition percentage.\n- Ensure that the new fields are validated to prevent incorrect data entry.\n\n#### b. Train Staff\n- Conduct training sessions for staff involved in inventory management and shirt production to familiarize them with the new fields and their importance.\n\n### 3. Backfill Historical Data\n\n#### a. Data Collection\n- Gather historical data on fabric composition ",
+    "raw_response": {
+      "session": "desktop",
+      "response": "To start tracking fabric composition for shirts, we can implement a structured plan that includes defining the necessary data model, updating existing processes, and backfilling historical data. Here’s a proposed plan:\n\n### 1. Define Data Model\n\n#### New Table: `shirt_fabric_composition`\nCreate a new table to store fabric composition details for shirts.\n\n**Table Structure:**\n```sql\nCREATE TABLE shirt_fabric_composition (\n    shirt_id SERIAL PRIMARY KEY,\n    fabric_type VARCHAR(100) NOT NULL,\n    composition_percentage DECIMAL(5, 2) NOT NULL CHECK (composition_percentage >= 0 AND composition_percentage <= 100),\n    last_update TIMESTAMP NOT NULL DEFAULT now()\n);\n```\n\n### 2. Update Existing Processes\n\n#### a. Modify Shirt Entry Process\n- Update the shirt entry form/process to include fields for fabric type and composition percentage.\n- Ensure that the new fields are validated to prevent incorrect data entry.\n\n#### b. Train Staff\n- Conduct training sessions for staff involved in inventory management and shirt production to familiarize them with the new fields and their importance.\n\n### 3. Backfill Historical Data\n\n#### a. Data Collection\n- Gather historical data on fabric composition for existing shirts. This may involve:\n  - Reviewing supplier documentation.\n  - Consulting with production teams.\n  - Analyzing existing inventory records.\n\n#### b. Data Entry\n- Create a script or manual process to enter the collected data into the `shirt_fabric_composition` table.\n- Example SQL for inserting backfilled data:\n```sql\nINSERT INTO shirt_fabric_composition (fabric_type, composition_percentage, last_update)\nVALUES \n('Cotton', 100.00, NOW()),\n('Polyester', 65.00, NOW()),\n('Cotton/Polyester Blend', 50.00, NOW());\n```\n\n### 4. Reporting and Analytics\n- Develop reports to analyze fabric compositions and their impact on sales, customer preferences, and inventory management.\n- Use data visualization tools to present insights to stakeholders.\n\n### 5. Ongoing Maintenance\n- Establish a process for regularly updating fabric composition data as new shirts are added or existing shirts are modified.\n- Schedule periodic reviews of the fabric composition data to ensure accuracy and completeness.\n\n### Conclusion\nThis plan provides a comprehensive approach to tracking fabric composition for shirts, ensuring that both current and historical data are accurately captured and maintained. By implementing this plan, the organization can enhance its inventory management and better meet customer needs.\n\nStaging:\n- Describe how to stage the changes safely before production.\n\nValidation:\n- Explain validation and QA steps to verify correctness.\n\nRollback:\n- Provide a rollback or remediation strategy if issues arise.",
+      "actions": [],
+      "payload_mode": "message",
+      "meta": {
+        "payload_mode": "message"
+      }
+    }
+  }
+]

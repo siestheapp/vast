@@ -1,0 +1,131 @@
+[
+  {
+    "name": "db_identity_and_table_count",
+    "prompt": "what database are you connected to and how many tables does it have",
+    "passed": true,
+    "failures": [],
+    "response_excerpt": "- Database: `pagila` (PostgreSQL PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1)) at `•••:•••/•••:•••`\n- User tables: 29 (excludes pg_catalog, information_schema)\n_Source: facts (identity live SQL; table count cache)._",
+    "raw_response": {
+      "session": "desktop",
+      "response": "- Database: `pagila` (PostgreSQL PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1)) at `•••:•••/•••:•••`\n- User tables: 29 (excludes pg_catalog, information_schema)\n_Source: facts (identity live SQL; table count cache)._",
+      "actions": [
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "db_identity",
+          "sql": "SELECT\n  current_database()               AS database,\n  inet_server_addr()::text         AS host,\n  inet_server_port()               AS port,\n  version()                        AS version",
+          "rows": [
+            {
+              "database": "pagila",
+              "host": "172.17.0.2/32",
+              "port": 5432,
+              "version": "PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+            }
+          ],
+          "source": "facts"
+        },
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "table_count",
+          "sql": "SELECT COUNT(*) AS table_count\nFROM information_schema.tables\nWHERE table_type = 'BASE TABLE'\n  AND table_schema NOT IN ('pg_catalog','information_schema','pg_toast');",
+          "rows": [
+            {
+              "table_count": 29
+            }
+          ],
+          "source": "facts"
+        }
+      ],
+      "payload_mode": "message",
+      "meta": {
+        "payload_mode": "message"
+      }
+    }
+  },
+  {
+    "name": "db_size_pronoun",
+    "prompt": "how large is it",
+    "passed": true,
+    "failures": [],
+    "response_excerpt": "Database size: **17 MB** (17461731 bytes).\n_Source: facts (live SQL)._",
+    "raw_response": {
+      "session": "desktop",
+      "response": "Database size: **17 MB** (17461731 bytes).\n_Source: facts (live SQL)._",
+      "actions": [
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "db_size",
+          "sql": "SELECT\n  pg_database_size(current_database())                 AS size_bytes,\n  pg_size_pretty(pg_database_size(current_database())) AS size_pretty",
+          "rows": [
+            {
+              "size_bytes": 17461731,
+              "size_pretty": "17 MB"
+            }
+          ],
+          "source": "facts+live-sql"
+        }
+      ],
+      "payload_mode": "message",
+      "meta": {
+        "payload_mode": "message"
+      }
+    }
+  },
+  {
+    "name": "db_identity_and_size",
+    "prompt": "what database are you connected to and how large is it",
+    "passed": true,
+    "failures": [],
+    "response_excerpt": "Connected to `pagila` at `•••:•••/•••:•••` (PostgreSQL PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1)).\n_Source: facts (live SQL)._\n\nDatabase size: **17 MB** (17461731 bytes).\n_Source: facts (live SQL)._",
+    "raw_response": {
+      "session": "desktop",
+      "response": "Connected to `pagila` at `•••:•••/•••:•••` (PostgreSQL PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1)).\n_Source: facts (live SQL)._\n\nDatabase size: **17 MB** (17461731 bytes).\n_Source: facts (live SQL)._",
+      "actions": [
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "db_identity",
+          "sql": "SELECT\n  current_database()               AS database,\n  inet_server_addr()::text         AS host,\n  inet_server_port()               AS port,\n  version()                        AS version",
+          "rows": [
+            {
+              "database": "pagila",
+              "host": "172.17.0.2/32",
+              "port": 5432,
+              "version": "PostgreSQL 16.10 (Debian 16.10-1.pgdg13+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+            }
+          ],
+          "source": "facts"
+        },
+        {
+          "success": true,
+          "type": "FACT",
+          "fact_key": "db_size",
+          "sql": "SELECT\n  pg_database_size(current_database())                 AS size_bytes,\n  pg_size_pretty(pg_database_size(current_database())) AS size_pretty",
+          "rows": [
+            {
+              "size_bytes": 17461731,
+              "size_pretty": "17 MB"
+            }
+          ],
+          "source": "facts+live-sql"
+        }
+      ],
+      "payload_mode": "message",
+      "meta": {
+        "payload_mode": "message"
+      }
+    }
+  },
+  {
+    "name": "ops_add_attribute_plan",
+    "prompt": "we need to start tracking fabric composition for shirts; propose a plan and backfill approach",
+    "passed": false,
+    "failures": [
+      "exception: HTTPConnectionPool(host='localhost', port=8010): Read timed out. (read timeout=90.0)"
+    ],
+    "response_excerpt": "",
+    "raw_response": {}
+  }
+]

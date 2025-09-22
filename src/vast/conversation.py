@@ -1,3 +1,4 @@
+# VAST: patch smoke-test marker (safe to keep or remove)
 """
 VAST Conversation Engine
 A persistent, context-aware database agent that acts as your DBA/CTO
@@ -28,6 +29,12 @@ from .agent import load_or_build_schema_summary
 from .system_ops import SystemOperations
 from . import service
 from .knowledge import get_knowledge_store
+
+# Ensure we can access the engine with fallback
+try:
+    from .db import get_engine  # if this file is in a package
+except Exception:
+    from db import get_engine   # if db.py is at repo root
 
 console = Console()
 
@@ -182,6 +189,15 @@ Style:
 - No filler text; no repeated disclaimers.
 
 Tone: precise, confident, and free of pleasantries or invitations (no "let me know" or "feel free to ask"). Respond like a senior engineer briefing peers—short, factual sentences, include only necessary detail.
+
+        Authoritative DB Policy:
+        - For any question about the CURRENT database (counts, sizes, existence, schema, relationships, examples), you MUST:
+          1) Generate a read-only SQL query against the connected database,
+          2) Execute it via VAST (no guessing),
+          3) Answer ONLY from the query result. Include a compact Markdown table when helpful.
+        - Never use phrases like “typically”, “usually”, “likely”, or generic answers about databases.
+        - If you cannot run a query, reply: "I need to run a query to determine this." and include the SQL in ```sql fences.
+
 """
         )
         
@@ -574,7 +590,44 @@ Remember: You are VAST, with direct database access. Current context:
         # Clear last actions
         self.last_actions = []
         
-        # MVP: auto-execute dump requests without waiting for the model
+        # --- Strict DB-fact routing (grounded only) ---------------------------------
+        t = user_input.lower()
+        DB_FACT_TRIGGERS = (
+            "how many", "count", "size", "largest", "biggest", "rows",
+            "tables", "indexes", "connected to", "what database", "schema",
+            "columns", "foreign key", "slow queries", "optimiz", "improv",
+        )
+        if any(k in t for k in DB_FACT_TRIGGERS):
+            sections = []
+
+            # identity
+            if ("what database" in t) or ("connected to" in t and "database" in t):
+                sections.append(self._render_db_identity_markdown())
+
+            # largest tables
+            if ("biggest tables" in t) or ("largest" in t and "tables" in t):
+                rows = self._biggest_tables(limit=10)
+                sections.append(self._render_biggest_tables_markdown(rows))
+
+            # health report / optimization
+            if any(k in t for k in ("improv", "optimiz", "performance", "slow queries", "health report")):
+                report = self._db_health_report()     # runs real queries
+                sections.append(self._render_db_health_markdown(report))
+
+            # database size
+            if ("size" in t and ("database" in t or "db" in t)) or ("database size" in t):
+                size = self._database_size()
+                sections.append(self._render_database_size_markdown(size))
+
+            if sections:
+                md = "\n\n---\n\n".join(sections)
+                assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
+                self.messages.append(assistant_msg)
+                self._save_session()
+                return md
+        # ---------------------------------------------------------------------------
+
+# MVP: auto-execute dump requests without waiting for the model
         if re.search(r"\b(sql\s+dump|database\s+dump|\bdump\b|\bbackup\b|\bexport\b)", user_input, re.I):
             # Choose plain format if the user asks for something human-readable
             wants_plain = bool(re.search(r"(human[- ]?readable|plain|.sql|text)", user_input, re.I))
@@ -698,37 +751,28 @@ Remember: You are VAST, with direct database access. Current context:
             code_blocks.setdefault('bash', [])
             code_blocks['bash'].extend(misclassified)
         
-        # Execute SQL if present and user approves
+        # Execute SQL: auto-run strictly read-only queries, ask for writes/DDL
         if sql_blocks:
             console.print("\n[yellow]📋 Proposed SQL Operations:[/]")
             for i, sql in enumerate(sql_blocks, 1):
                 console.print(Panel(Syntax(sql, "sql"), title=f"Operation {i}"))
-            
-            should_execute = auto_execute
-            if not auto_execute:
-                try:
-                    should_execute = console.input("\n[cyan]Execute these operations? (yes/no): [/]").lower() == 'yes'
-                except EOFError:
-                    # Non-interactive mode
-                    console.print("[dim]Non-interactive mode - skipping execution[/]")
-                    should_execute = False
-            
-            if should_execute:
-                for sql in sql_blocks:
-                    # Determine if this is DDL
-                    is_ddl = any(sql.strip().upper().startswith(cmd) for cmd in ['CREATE', 'ALTER', 'DROP'])
-                    
-                    result = self._execute_sql(sql, allow_ddl=is_ddl)
-                    self.last_actions.append(result)
-                    
-                    if result["success"]:
-                        console.print(f"[green]✓ Executed successfully[/]")
-                        # Convert rows to serializable format
+
+            for sql in sql_blocks:
+                normalized = sql.strip()
+                upper = normalized.upper()
+                is_ddl = any(upper.startswith(cmd) for cmd in ['CREATE', 'ALTER', 'DROP', 'TRUNCATE'])
+                is_write = any(upper.startswith(cmd) for cmd in ['INSERT', 'UPDATE', 'DELETE', 'MERGE'])
+
+                if not is_ddl and not is_write:
+                    # Auto-execute read-only (e.g., SELECT, EXPLAIN, SHOW)
+                    result = self._execute_sql(normalized, allow_ddl=False)
+                    self.last_actions.append(result | {"type": "dml"})
+                    if result.get("success"):
+                        # Store up to 10 rows in conversation log for provenance
                         if "rows" in result and result["rows"]:
                             serializable_rows = []
-                            for row in result["rows"][:10]:  # Limit to 10 rows for storage
+                            for row in result["rows"][:10]:
                                 try:
-                                    # Try to convert to dict
                                     if hasattr(row, '_asdict'):
                                         serializable_rows.append(row._asdict())
                                     elif hasattr(row, '_mapping'):
@@ -740,17 +784,43 @@ Remember: You are VAST, with direct database access. Current context:
                             result["rows"] = serializable_rows
                         exec_msg = Message(
                             role=MessageRole.EXECUTION,
-                            content=f"Executed SQL: {sql[:100]}...",
+                            content=f"Executed read-only SQL: {normalized[:100]}...",
                             metadata=result
                         )
                         self.messages.append(exec_msg)
                     else:
-                        console.print(f"[red]✗ Error: {result['error']}[/]")
-                        response += f"\n\n⚠️ Execution error: {result['error']}"
-                
-                # Refresh schema if DDL was executed
-                if any(a.get("type") == "ddl" for a in self.last_actions):
-                    self._refresh_schema_context()
+                        console.print(f"[red]✗ Error: {result.get('error')}[/]")
+                        response += f"\n\n⚠️ Execution error: {result.get('error')}"
+                    continue
+
+                # Writes/DDL require explicit approval unless auto_execute=True
+                should_execute = auto_execute
+                if not auto_execute:
+                    try:
+                        prompt = "\n[cyan]This operation modifies schema/data. Execute? (yes/no): [/]"
+                        should_execute = console.input(prompt).lower() == 'yes'
+                    except EOFError:
+                        console.print("[dim]Non-interactive mode - skipping write/DDL execution[/]")
+                        should_execute = False
+
+                if should_execute:
+                    result = self._execute_sql(normalized, allow_ddl=is_ddl)
+                    self.last_actions.append(result)
+                    if result.get("success"):
+                        console.print("[green]✓ Executed successfully[/]")
+                        exec_msg = Message(
+                            role=MessageRole.EXECUTION,
+                            content=f"Executed SQL: {normalized[:100]}...",
+                            metadata=result
+                        )
+                        self.messages.append(exec_msg)
+                    else:
+                        console.print(f"[red]✗ Error: {result.get('error')}[/]")
+                        response += f"\n\n⚠️ Execution error: {result.get('error')}"
+
+            # Refresh schema if any DDL executed
+            if any(a.get("type") == "ddl" for a in self.last_actions):
+                self._refresh_schema_context()
         
         # Handle system commands (bash/shell)
         bash_blocks = code_blocks.get('bash', []) + code_blocks.get('system', [])
@@ -814,6 +884,16 @@ Remember: You are VAST, with direct database access. Current context:
         self._extract_context_updates(response)
         
         # Add assistant response to history
+        if self._is_db_fact_question(user_input) and not self._grounding_evidence_present_this_turn():
+            # refuse generic answer and force a query proposal
+            response = ("I need to run a query to determine this.\n\n"
+                        "```sql\n-- I will generate and execute the appropriate SELECT against the connected database\n```")
+
+        # Optional: block hedgy language on DB facts
+        if self._is_db_fact_question(user_input) and self._HEDGES.search(response or ""):
+            response = response.replace("typically", "").replace("usually", "").replace("likely", "")
+
+        response = self._enforce_grounding(user_input, response)
         assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)
         self.messages.append(assistant_msg)
         
@@ -896,6 +976,273 @@ Remember: You are VAST, with direct database access. Current context:
         self.context.design_decisions.append(decision)
         self._save_session()
         console.print(f"[green]✓ Design decision recorded: {decision}[/]")
+
+    # ------------------------ Grounded helpers -------------------------------
+    def _biggest_tables(self, limit: int = 10):
+        """Return largest tables by total size using pg_total_relation_size."""
+        sql = """
+        SELECT
+          n.nspname AS schema,
+          c.relname AS table,
+          pg_total_relation_size(c.oid) AS total_bytes,
+          pg_relation_size(c.oid)      AS table_bytes,
+          COALESCE(pg_stat_get_live_tuples(c.oid), 0) AS approx_rows
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'r'
+        ORDER BY pg_total_relation_size(c.oid) DESC
+        LIMIT :limit;
+        """
+        with get_engine(readonly=True).begin() as conn:
+            rows = conn.execute(text(sql), {"limit": limit}).mappings().all()
+        return rows
+
+    def _render_biggest_tables_markdown(self, rows) -> str:
+        def fmt_bytes(b):
+            units = ["B","KB","MB","GB","TB","PB"]
+            i = 0
+            b = float(b or 0)
+            while b >= 1024 and i < len(units)-1:
+                b /= 1024.0
+                i += 1
+            return f"{b:.0f} {units[i]}"
+        lines = [
+            "Here are the largest tables **in the connected database** (by total size):",
+            "",
+            "| # | schema.table | size | rows |",
+            "|---|--------------|------|------|",
+        ]
+        for i, r in enumerate(rows, 1):
+            fq = f"{r['schema']}.{r['table']}"
+            lines.append(f"| {i} | `{fq}` | {fmt_bytes(r['total_bytes'])} | {int(r['approx_rows'])} |")
+        return "\n".join(lines)
+
+    def _database_size(self):
+        sql = """
+        SELECT
+          pg_size_pretty(pg_database_size(current_database())) AS database_size_pretty,
+          pg_database_size(current_database())                AS database_size_bytes
+        """
+        with get_engine(readonly=True).begin() as conn:
+            row = conn.execute(text(sql)).mappings().first()
+        return row or {"database_size_pretty": None, "database_size_bytes": None}
+
+    def _render_database_size_markdown(self, row) -> str:
+        pretty = row.get("database_size_pretty") if isinstance(row, dict) else row["database_size_pretty"]
+        bytes_ = row.get("database_size_bytes") if isinstance(row, dict) else row["database_size_bytes"]
+        return (
+            "### Database size\n"
+            "| pretty | bytes |\n"
+            "|--------|-------|\n"
+            f"| {pretty} | {bytes_} |"
+        )
+
+    # --- Live DB identity (no guessing) ---
+    def _render_db_identity_markdown(self) -> str:
+        sql = """
+        SELECT
+          current_database()               AS database,
+          inet_server_addr()::text         AS host,
+          inet_server_port()               AS port,
+          version()                        AS version
+        """
+        with get_engine(readonly=True).begin() as conn:
+            row = conn.execute(text(sql)).mappings().first()
+        db = row["database"] or "unknown"
+        host = row["host"] or "localhost"
+        port = row["port"]
+        ver = row["version"].split(" on ", 1)[0]
+        return (
+            f"I am connected to **{db}** at **{host}:{port}**.\n\n"
+            f"_PostgreSQL: {ver}_"
+        )
+
+    def _db_health_report(self):
+        """
+        Collect high-signal read-only diagnostics from Postgres.
+        Returns a dict of result lists. All queries run against the connected DB.
+        """
+        out = {}
+        with get_engine(readonly=True).begin() as conn:
+            # Largest tables by total size
+            out["largest_tables"] = conn.execute(text("""
+                SELECT
+                  n.nspname AS schema,
+                  c.relname AS table,
+                  pg_total_relation_size(c.oid) AS total_bytes,
+                  COALESCE(pg_stat_get_live_tuples(c.oid), 0) AS approx_rows
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind = 'r'
+                ORDER BY pg_total_relation_size(c.oid) DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            # Tables with heavy seq scans (likely missing/weak indexes)
+            out["seq_scan_heavy"] = conn.execute(text("""
+                SELECT
+                  relname AS table,
+                  seq_scan,
+                  idx_scan,
+                  n_live_tup
+                FROM pg_stat_user_tables
+                ORDER BY seq_scan DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            # Unused or rarely used indexes (idx_scan = 0)
+            out["unused_indexes"] = conn.execute(text("""
+                SELECT
+                  s.relname AS table,
+                  i.indexrelname AS index,
+                  pg_relation_size(i.indexrelid) AS index_bytes,
+                  COALESCE(x.idx_scan, 0) AS idx_scan
+                FROM pg_class c
+                JOIN pg_index i ON i.indrelid = c.oid
+                JOIN pg_class ic ON ic.oid = i.indexrelid
+                JOIN pg_stat_user_indexes x ON x.indexrelid = i.indexrelid
+                JOIN pg_stat_user_tables s ON s.relid = c.oid
+                WHERE x.idx_scan = 0
+                ORDER BY pg_relation_size(i.indexrelid) DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            # Dead tuples (vacuum pressure)
+            out["dead_tuples"] = conn.execute(text("""
+                SELECT
+                  relname AS table,
+                  n_live_tup,
+                  n_dead_tup
+                FROM pg_stat_user_tables
+                WHERE n_dead_tup > 0
+                ORDER BY n_dead_tup DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            # Cache hit ratio (overall)
+            out["cache_hit"] = conn.execute(text("""
+                SELECT
+                  ROUND(100.0 * SUM(blks_hit) / NULLIF(SUM(blks_hit + blks_read),0), 2) AS cache_hit_pct
+                FROM pg_stat_database
+            """)).mappings().first()
+
+            # Autovacuum key settings (for visibility & tuning)
+            out["autovacuum_settings"] = conn.execute(text("""
+                SELECT name, setting
+                FROM pg_settings
+                WHERE name IN (
+                  'autovacuum', 'autovacuum_naptime', 'autovacuum_vacuum_scale_factor',
+                  'autovacuum_analyze_scale_factor', 'autovacuum_vacuum_threshold',
+                  'autovacuum_analyze_threshold'
+                )
+                ORDER BY name
+            """)).mappings().all()
+
+        return out
+
+    def _render_db_health_markdown(self, r) -> str:
+        def fmt_bytes(b):
+            units = ["B","KB","MB","GB","TB","PB"]; i=0; b=float(b or 0)
+            while b>=1024 and i<len(units)-1: b/=1024.0; i+=1
+            return f"{b:.0f} {units[i]}"
+
+        lines = []
+
+        # Summary bullets (prioritized)
+        cache = r.get("cache_hit", {}) or {}
+        cache_pct = cache.get("cache_hit_pct")
+        if cache_pct is not None:
+            lines.append(f"**Buffer cache hit ratio:** {cache_pct}%")
+
+        if r["seq_scan_heavy"]:
+            t = r["seq_scan_heavy"][0]
+            lines.append(f"**High seq scans:** `{t['table']}` (seq_scan={t['seq_scan']}, idx_scan={t['idx_scan']}) → likely index gaps.")
+
+        if r["dead_tuples"]:
+            dt = r["dead_tuples"][0]
+            lines.append(f"**Dead tuples pressure:** `{dt['table']}` has {dt['n_dead_tup']} dead vs {dt['n_live_tup']} live tuples → vacuum/auto-vacuum tuning.")
+
+        lines.append("")
+        lines.append("### Largest tables (by size)")
+        lines.append("| # | table | size | approx_rows |")
+        lines.append("|---|-------|------|-------------|")
+        for i, row in enumerate(r["largest_tables"], 1):
+            fq = f"{row['schema']}.{row['table']}"
+            lines.append(f"| {i} | `{fq}` | {fmt_bytes(row['total_bytes'])} | {int(row['approx_rows'])} |")
+
+        if r["seq_scan_heavy"]:
+            lines.append("")
+            lines.append("### Tables with heavy sequential scans")
+            lines.append("| table | seq_scan | idx_scan | live_rows |")
+            lines.append("|-------|----------|----------|-----------|")
+            for row in r["seq_scan_heavy"]:
+                lines.append(f"| `{row['table']}` | {row['seq_scan']} | {row['idx_scan']} | {row['n_live_tup']} |")
+
+        if r["unused_indexes"]:
+            lines.append("")
+            lines.append("### Unused / rarely used indexes (idx_scan = 0)")
+            lines.append("| table | index | size | idx_scan |")
+            lines.append("|-------|-------|------|----------|")
+            for row in r["unused_indexes"]:
+                lines.append(f"| `{row['table']}` | `{row['index']}` | {fmt_bytes(row['index_bytes'])} | {row['idx_scan']} |")
+
+        if r["dead_tuples"]:
+            lines.append("")
+            lines.append("### Dead tuples (vacuum pressure)")
+            lines.append("| table | dead_tup | live_tup |")
+            lines.append("|-------|----------|----------|")
+            for row in r["dead_tuples"]:
+                lines.append(f"| `{row['table']}` | {row['n_dead_tup']} | {row['n_live_tup']} |")
+
+        if r["autovacuum_settings"]:
+            lines.append("")
+            lines.append("### Autovacuum settings (current)")
+            lines.append("| name | value |")
+            lines.append("|------|-------|")
+            for s in r["autovacuum_settings"]:
+                lines.append(f"| `{s['name']}` | `{s['setting']}` |")
+
+        # Actionable recommendations tied to evidence
+        recs = []
+        if r["seq_scan_heavy"]:
+            recs.append("Add/verify indexes for the high **seq_scan** tables above (start with the top 3).")
+        if r["unused_indexes"]:
+            recs.append("Drop or justify **unused indexes** (idx_scan=0) after verifying in production traffic.")
+        if r["dead_tuples"]:
+            recs.append("Tune **autovacuum** and schedule manual `VACUUM (VERBOSE, ANALYZE)` for the top dead-tuple tables.")
+        if cache_pct is not None and cache_pct < 95:
+            recs.append("Cache hit ratio <95%: review working-set size, increase memory, or optimize repeated scans.")
+
+        if recs:
+            lines.insert(0, "#### Recommended next steps (based on live metrics)")
+            lines.insert(1, "\n".join([f"- {x}" for x in recs]) + "\n")
+
+        return "\n".join(lines)
+
+    # --- Grounding enforcement (blocks "typically/likely/usually" on DB facts) ---
+    import re as _re
+    _HEDGES = _re.compile(r"\b(typically|usually|likely|generally|commonly|often|might|may)\b", _re.I)
+
+    def _is_db_fact_question(self, s: str) -> bool:
+        s = s.lower()
+        return any(k in s for k in [
+            "how many","count","size","largest","biggest","rows","tables","indexes",
+            "what database","connected to","schema","columns","foreign key","slow queries","optimiz","improv"
+        ])
+
+    def _grounding_evidence_present_this_turn(self) -> bool:
+        # Minimal: if any of our grounded helpers ran, we would have pushed an action
+        # or you can track a flag when you call get_engine/execute in this turn.
+        return any(a.get("type") in {"sql_query","health_report","biggest_tables","db_identity"}
+                   for a in (self.last_actions or []))
+
+    def _enforce_grounding(self, user_input: str, response: str) -> str:
+        if not response:
+            return response
+        if self._is_db_fact_question(user_input) and self._HEDGES.search(response):
+            return ("I need to run a query to determine this.\n\n"
+                    "```sql\n-- VAST will generate and execute the appropriate SELECT against the connected database\n```")
+        return response
 
 
 # Convenience function for CLI

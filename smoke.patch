@@ -1,0 +1,9 @@
+diff --git a/src/vast/conversation.py b/src/vast/conversation.py
+index 0000000..0000001 100644
+--- a/src/vast/conversation.py
++++ b/src/vast/conversation.py
+@@ -1,3 +1,4 @@
++# VAST: patch smoke-test marker (safe to keep or remove)
+ """
+ VAST Conversation Engine
+ A persistent, context-aware database agent that acts as your DBA/CTO

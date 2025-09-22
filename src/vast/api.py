@@ -10,6 +10,46 @@ from pydantic import BaseModel, Field
 
 from . import service
 from .conversation import VastConversation
+from collections.abc import Mapping
+from datetime import datetime
+from pathlib import Path
+
+
+def _json_safe(value):
+    """Recursively convert objects into JSON-serializable structures."""
+    # Primitives
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    # Datetime / Path
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+
+    # SQLAlchemy rows expose _mapping for dict-like access
+    if hasattr(value, "_asdict"):
+        try:
+            return {k: _json_safe(v) for k, v in value._asdict().items()}
+        except Exception:
+            return str(value)
+    if hasattr(value, "_mapping"):
+        try:
+            return {k: _json_safe(v) for k, v in value._mapping.items()}
+        except Exception:
+            return str(value)
+
+    # Mappings / Sequences / Sets
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in list(value)]
+
+    # Fallback
+    try:
+        return json.loads(json.dumps(value))
+    except Exception:
+        return str(value)
 
 
 class RunSQLRequest(BaseModel):
@@ -155,7 +195,7 @@ def create_app() -> FastAPI:
             return {
                 "session": conv.session_name,
                 "response": resp_text,
-                "actions": conv.last_actions,
+                "actions": _json_safe(conv.last_actions),
             }
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

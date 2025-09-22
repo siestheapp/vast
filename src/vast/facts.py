@@ -330,7 +330,18 @@ class FactAnswer:
     log_entries: List[ExecutionLog] = field(default_factory=list)
 
 
-def try_answer_with_facts(runtime: FactsRuntime, user_text: str) -> Optional[FactAnswer]:
+def try_answer_with_facts(runtime_or_ctx, user_text: str) -> Optional[Dict[str, Any]]:
+    # --- ADAPTER: allow passing either FactsRuntime or a raw context with engine/db/schema_cache ---
+    runtime = runtime_or_ctx
+    if not hasattr(runtime_or_ctx, "fetch_db_identity"):
+        # construct a minimal FactsRuntime from the ctx-like object
+        runtime = FactsRuntime(
+            engine=runtime_or_ctx.engine,
+            db=runtime_or_ctx.db,
+            schema_cache=runtime_or_ctx.schema_cache,
+            audit=getattr(runtime_or_ctx, "audit", None),
+        )
+    
     consumed: Set[str] = set()
     chunks: List[str] = []
     logs: List[ExecutionLog] = []

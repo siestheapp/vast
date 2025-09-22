@@ -605,10 +605,14 @@ Remember: You are VAST, with direct database access. Current context:
         fact_answer = try_answer_with_facts(facts_runtime, user_input)
         if fact_answer:
             for log in fact_answer.log_entries:
+                metadata = dict(log.metadata)
+                metadata.setdefault("type", "FACT")
+                if "fact_key" not in metadata:
+                    metadata["fact_key"] = log.content
                 exec_msg = Message(
                     role=MessageRole.EXECUTION,
                     content=log.content,
-                    metadata=log.metadata,
+                    metadata=metadata,
                 )
                 self.last_actions.append(exec_msg.metadata)
                 self.messages.append(exec_msg)

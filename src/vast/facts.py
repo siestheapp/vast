@@ -59,6 +59,28 @@ class SchemaCache:
         self.save()
 
 
+IDENTITY_SQL = """
+SELECT
+  current_database()               AS database,
+  inet_server_addr()::text         AS host,
+  inet_server_port()               AS port,
+  version()                        AS version
+""".strip()
+
+DB_SIZE_SQL = """
+SELECT
+  pg_database_size(current_database())                 AS size_bytes,
+  pg_size_pretty(pg_database_size(current_database())) AS size_pretty
+""".strip()
+
+TABLE_COUNT_SQL = """
+SELECT COUNT(*) AS table_count
+FROM information_schema.tables
+WHERE table_type = 'BASE TABLE'
+  AND table_schema NOT IN ('pg_catalog','information_schema','pg_toast');
+""".strip()
+
+
 @dataclass
 class FactsRuntime:
     database_url: Optional[str] = None
@@ -143,24 +165,17 @@ class FactsRuntime:
                 "host": getattr(self.engine, "host", "localhost"),
                 "port": getattr(self.engine, "port", None),
                 "version": self.engine.server_version(),
-                "sql": None,
+                "sql": IDENTITY_SQL,
             }
 
-        sql = """
-        SELECT
-          current_database()               AS database,
-          inet_server_addr()::text         AS host,
-          inet_server_port()               AS port,
-          version()                        AS version
-        """
         if not self.engine or not hasattr(self.engine, "begin"):
             return None
         with self.engine.begin() as conn:
-            row = conn.execute(text(sql)).mappings().first()
+            row = conn.execute(text(IDENTITY_SQL)).mappings().first()
         if row is None:
             return None
         payload = dict(row)
-        payload.setdefault("sql", sql)
+        payload.setdefault("sql", IDENTITY_SQL)
         return payload
 
     def fetch_table_count(self) -> tuple[Optional[int], str, Optional[Dict[str, Any]]]:
@@ -173,22 +188,28 @@ class FactsRuntime:
                 count = int(count) if count is not None else None
             except (TypeError, ValueError):
                 count = None
-            return count, "cache", None
-
-        sql = (
-            "SELECT COUNT(*) AS table_count\n"
-            "FROM information_schema.tables\n"
-            "WHERE table_schema NOT IN ('pg_catalog','information_schema');"
-        )
+            metadata = {
+                "success": True,
+                "type": "FACT",
+                "fact_key": "table_count",
+                "sql": TABLE_COUNT_SQL,
+                "rows": [{"table_count": count}] if count is not None else [{}],
+                "source": "facts",
+            }
+            log = {
+                "content": "Facts: table count lookup (cache)",
+                "metadata": metadata,
+            }
+            return count, "cache", log
 
         count: Optional[int] = None
         if self.db and hasattr(self.db, "scalar"):
-            value = self.db.scalar(sql)
+            value = self.db.scalar(TABLE_COUNT_SQL)
             if value is not None:
                 count = int(value)
         elif self.engine and hasattr(self.engine, "begin"):
             with self.engine.begin() as conn:
-                row = conn.execute(text(sql)).mappings().first()
+                row = conn.execute(text(TABLE_COUNT_SQL)).mappings().first()
             if row is not None:
                 raw = row.get("table_count") if isinstance(row, dict) else row["table_count"]
                 count = int(raw)
@@ -201,17 +222,46 @@ class FactsRuntime:
         self._schema_cache_update(count)
         metadata = {
             "success": True,
-            "type": "table_count",
-            "sql": sql.strip(),
+            "type": "FACT",
+            "fact_key": "table_count",
+            "sql": TABLE_COUNT_SQL,
             "rows": [{"table_count": count}],
-            "count": 1,
-            "source": "facts",
+            "source": "facts+live-sql",
         }
         log = {
             "content": "Facts: table count lookup",
             "metadata": metadata,
         }
         return count, "live-sql", log
+
+    def fetch_db_size(self) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        if not self.engine or not hasattr(self.engine, "begin"):
+            return None, None
+
+        with self.engine.begin() as conn:
+            row = conn.execute(text(DB_SIZE_SQL)).mappings().first()
+        if row is None:
+            return None, None
+
+        size_bytes = int(row.get("size_bytes") if isinstance(row, dict) else row["size_bytes"])
+        size_pretty = row.get("size_pretty") if isinstance(row, dict) else row["size_pretty"]
+        payload = {
+            "size_bytes": size_bytes,
+            "size_pretty": size_pretty,
+        }
+        metadata = {
+            "success": True,
+            "type": "FACT",
+            "fact_key": "db_size",
+            "sql": DB_SIZE_SQL,
+            "rows": [{"size_bytes": size_bytes, "size_pretty": size_pretty}],
+            "source": "facts+live-sql",
+        }
+        log = {
+            "content": "Facts: database size lookup",
+            "metadata": metadata,
+        }
+        return payload, log
 
 
 @dataclass
@@ -310,7 +360,8 @@ def _resolve_db_and_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) ->
         content="Facts: database identity lookup",
         metadata={
             "success": True,
-            "type": "db_identity",
+            "type": "FACT",
+            "fact_key": "db_identity",
             "sql": identity.get("sql"),
             "rows": [{
                 "database": identity.get("database"),
@@ -318,7 +369,6 @@ def _resolve_db_and_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) ->
                 "port": identity.get("port"),
                 "version": identity.get("version"),
             }],
-            "count": 1,
             "source": "facts",
         },
     )
@@ -363,7 +413,8 @@ def _resolve_db_identity(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
         content="Facts: database identity lookup",
         metadata={
             "success": True,
-            "type": "db_identity",
+            "type": "FACT",
+            "fact_key": "db_identity",
             "sql": identity.get("sql"),
             "rows": [{
                 "database": identity.get("database"),
@@ -371,7 +422,6 @@ def _resolve_db_identity(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
                 "port": identity.get("port"),
                 "version": identity.get("version"),
             }],
-            "count": 1,
             "source": "facts",
         },
     )
@@ -416,6 +466,50 @@ def _resolve_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
     )
 
 
+def _detect_db_size(text: str) -> Optional[Dict[str, Any]]:
+    ql = text.lower()
+    size_tokens = (
+        "database size",
+        "size of the database",
+        "how big is the database",
+        "how large is the database",
+        "db size",
+        "how large is it",
+        "how big is it",
+    )
+    return {} if any(token in ql for token in size_tokens) else None
+
+
+def _resolve_db_size(runtime: FactsRuntime, slots: Dict[str, Any]) -> Optional[FactResolution]:
+    payload, log = runtime.fetch_db_size()
+    if payload is None:
+        return None
+
+    size_pretty = payload.get("size_pretty")
+    size_bytes = payload.get("size_bytes")
+    content = (
+        f"Database size: **{size_pretty}** ({size_bytes} bytes).\n"
+        "_Source: facts (live SQL)._"
+    )
+
+    logs: List[ExecutionLog] = []
+    if log:
+        logs.append(ExecutionLog(content=log["content"], metadata=log["metadata"]))
+
+    return FactResolution(
+        key="db_size",
+        content=content,
+        source="live-sql",
+        payload={
+            "database_size_pretty": size_pretty,
+            "database_size_bytes": size_bytes,
+            "source": "facts+live-sql",
+        },
+        intents_consumed={"db_size"},
+        log_entries=logs,
+    )
+
+
 FACTS: List[Fact] = [
     Fact(
         key="db_and_table_count",
@@ -434,6 +528,12 @@ FACTS: List[Fact] = [
         intents={"table_count"},
         detect=_detect_table_count,
         resolve=_resolve_table_count,
+    ),
+    Fact(
+        key="db_size",
+        intents={"db_size"},
+        detect=_detect_db_size,
+        resolve=_resolve_db_size,
     ),
 ]
 

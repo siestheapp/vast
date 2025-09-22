@@ -2,24 +2,34 @@ import types
 
 # ---- fakes ----
 class FakeEngine:
-    def current_database(self): return "pagila"
-    def server_version(self):   return "16.10"
+    def current_database(self):
+        return "pagila"
+
+    def server_version(self):
+        return "16.10"
 
 class FakeCache:
     def __init__(self, fresh, count=None):
         self._fresh = fresh
         self.table_count = count
         self.touched = False
-    def is_fresh(self): return self._fresh
-    def touch(self):    self.touched = True
+
+    def is_fresh(self):
+        return self._fresh
+
+    def touch(self):
+        self.touched = True
 
 class FakeDB:
     def __init__(self, value):
         self.calls = 0
         self.value = value
+        self.last_sql = None
+
     def scalar(self, sql):
         assert "information_schema.tables" in sql
         self.calls += 1
+        self.last_sql = sql
         return self.value
 
 def make_ctx(fresh, count=None, live_value=42):
@@ -49,6 +59,8 @@ def test_compound_runs_live_sql_when_stale_and_updates_cache():
     assert payload["table_count"] == 55
     assert payload["source"] == "facts+live-sql"
     assert ctx.db.calls == 1
+    assert "table_type = 'BASE TABLE'" in ctx.db.last_sql
+    assert "pg_toast" in ctx.db.last_sql
     assert ctx.schema_cache.table_count == 55
     assert ctx.schema_cache.touched
 
@@ -58,3 +70,84 @@ def test_single_fact_paths_also_work():
     p2 = try_answer_with_facts(ctx, "how many tables are there?")
     assert p1["database"] == "pagila"
     assert p2["table_count"] == 10
+
+
+class FakeBeginConn:
+    def __init__(self, engine):
+        self.engine = engine
+
+    def __enter__(self):
+        return self.engine
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakeSizeEngine:
+    def __init__(self, size_bytes, size_pretty):
+        self.size_bytes = size_bytes
+        self.size_pretty = size_pretty
+        self.last_sql = None
+
+    # satisfy identity fallback
+    def current_database(self):
+        return "pagila"
+
+    def server_version(self):
+        return "16.10"
+
+    def begin(self):
+        return FakeBeginConn(self)
+
+    def execute(self, sql):
+        self.last_sql = sql
+
+        class Result:
+            def mappings(_self):
+                class Map:
+                    def first(__self):
+                        return {
+                            "size_bytes": self.size_bytes,
+                            "size_pretty": self.size_pretty,
+                        }
+
+                return Map()
+
+        return Result()
+
+
+def test_db_size_fact_pronoun_only():
+    ctx = types.SimpleNamespace()
+    ctx.engine = FakeSizeEngine(size_bytes=123456789, size_pretty="118 MB")
+    ctx.schema_cache = FakeCache(fresh=False, count=5)
+    ctx.db = FakeDB(value=5)
+    ctx.audit = []
+
+    answer = try_answer_with_facts(ctx, "how large is it")
+
+    assert answer["database_size_bytes"] == 123456789
+    assert answer["database_size_pretty"] == "118 MB"
+    assert answer["source"] == "facts+live-sql"
+    assert "118 MB" in answer.content
+    assert "123456789" in answer.content
+    log = answer.log_entries[0].metadata
+    assert log["type"] == "FACT"
+    assert log["fact_key"] == "db_size"
+    assert "pg_database_size" in log["sql"]
+
+
+def test_combined_identity_and_size():
+    ctx = types.SimpleNamespace()
+    ctx.engine = FakeSizeEngine(size_bytes=22334455, size_pretty="21 MB")
+    ctx.schema_cache = FakeCache(fresh=True, count=5)
+    ctx.db = FakeDB(value=5)
+    ctx.audit = []
+
+    answer = try_answer_with_facts(ctx, "what database are you connected to and how large is it")
+
+    assert answer["database"] == "pagila"
+    assert answer["database_size_bytes"] == 22334455
+    assert "21 MB" in answer.content
+
+    fact_keys = {log.metadata.get("fact_key") for log in answer.log_entries}
+    assert {"db_identity", "db_size"}.issubset(fact_keys)

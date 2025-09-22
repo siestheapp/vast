@@ -1,0 +1,44 @@
+# convo_suite.yaml
+# Each case has: name, prompt, checks (contains/regex), and optional must_not_contain
+# You can add more cases over time as features ship.
+
+cases:
+  - name: db_identity_and_table_count
+    prompt: "what database are you connected to and how many tables does it have"
+    checks:
+      contains:
+        - "Database:"
+        - "User tables:"
+      regex:
+        - "(?i)user tables:\\s*\\d+"
+        - "(?i)excludes\\s+pg_catalog.*information_schema"
+
+  - name: db_size_pronoun
+    prompt: "how large is it"
+    checks:
+      contains:
+        - "size"
+        - "MB"
+      regex:
+        - "\\b\\d{2,}\\s?(MB|GB|TB)\\b"
+
+  - name: db_identity_and_size
+    prompt: "what database are you connected to and how large is it"
+    checks:
+      contains:
+        - "pagila"
+        - "size"
+    must_not_contain:
+      - "I currently do not have the capability"
+      - "I cannot"
+
+  # Example "ops request" placeholder to track planner path (will evolve)
+  - name: ops_add_attribute_plan
+    prompt: "we need to start tracking fabric composition for shirts; propose a plan and backfill approach"
+    checks:
+      # loosen until Ops Planner returns structured steps
+      contains:
+        - "plan"
+        - "backfill"
+        - "schema"
+        - "validation"

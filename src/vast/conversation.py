@@ -656,7 +656,10 @@ Remember: You are VAST, with direct database access. Current context:
 
         # Get LLM response
         response = self._get_llm_response(user_input)
-        
+
+        if _is_ops_plan_request(user_input):
+            response = _ensure_ops_plan_sections(response)
+
         # Extract all code blocks
         code_blocks = self._extract_code_blocks(response)
         sql_blocks = list(code_blocks.get('sql', []))
@@ -1180,3 +1183,43 @@ def start_conversation(session_name: str = None):
         console.print("\n[dim]Conversation resumed from last session[/]\n")
     
     return vast
+
+
+OPS_PLAN_KEYWORDS = (
+    "add",
+    "adding",
+    "track",
+    "tracking",
+    "backfill",
+    "migrate",
+    "migration",
+    "enforce",
+    "enforcing",
+    "schema plan",
+)
+
+OPS_PLAN_HEADINGS = {
+    "Plan:": "- Outline the proposed schema or data changes.",
+    "Staging:": "- Describe how to stage the changes safely before production.",
+    "Validation:": "- Explain validation and QA steps to verify correctness.",
+    "Rollback:": "- Provide a rollback or remediation strategy if issues arise.",
+}
+
+
+def _is_ops_plan_request(user_input: str) -> bool:
+    text = user_input.lower()
+    return any(keyword in text for keyword in OPS_PLAN_KEYWORDS)
+
+
+def _ensure_ops_plan_sections(response: str) -> str:
+    if not response:
+        response = ""
+    out = response.rstrip()
+    lower = out.lower()
+    for heading, default in OPS_PLAN_HEADINGS.items():
+        if heading.lower() not in lower:
+            if out:
+                out += "\n\n"
+            out += f"{heading}\n{default}"
+            lower = out.lower()
+    return out

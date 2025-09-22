@@ -16,11 +16,12 @@ def load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-PAYLOAD_MODES = ("auto", "user_input", "prompt", "messages")
+PAYLOAD_MODES = ("auto", "message", "prompt", "user_input", "messages")
 
 
 def _payload_shapes(prompt: str):
     return {
+        "message": {"message": prompt},
         "user_input": {"user_input": prompt},
         "prompt": {"prompt": prompt},
         "messages": {"messages": [{"role": "user", "content": prompt}]},
@@ -55,7 +56,7 @@ def post_prompt(base: str, prompt: str, mode: str) -> Dict[str, Any]:
         return {"content": body, "payload_mode": payload_mode}
 
     if mode == "auto":
-        for name in ("user_input", "prompt", "messages"):
+        for name in ("message", "prompt", "user_input", "messages"):
             tried.append(name)
             resp = _send(name)
             if not resp.get("error"):
@@ -78,7 +79,9 @@ def post_prompt(base: str, prompt: str, mode: str) -> Dict[str, Any]:
     return _send(mode)
 
 def extract_text(resp: Dict[str, Any]) -> str:
-    # Try common shapes: {message: {content}}, {content}, raw_text, etc.
+    # Try common shapes: response -> content -> message dicts -> raw_text -> fallback
+    if "response" in resp and isinstance(resp["response"], str):
+        return resp["response"]
     if "content" in resp and isinstance(resp["content"], str):
         return resp["content"]
     msg = resp.get("message") or resp.get("assistant") or {}

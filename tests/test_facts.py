@@ -151,3 +151,27 @@ def test_combined_identity_and_size():
 
     fact_keys = {log.metadata.get("fact_key") for log in answer.log_entries}
     assert {"db_identity", "db_size"}.issubset(fact_keys)
+
+
+def test_fact_identity_masks_host_port_by_default(monkeypatch):
+    monkeypatch.delenv("VAST_MASK_HOST_PORT", raising=False)
+    ctx = make_ctx(fresh=True, count=10)
+    ctx.engine.host = "172.17.0.2"
+    ctx.engine.port = 5432
+
+    answer = try_answer_with_facts(ctx, "which database are you connected to?")
+
+    assert "•••:•••" in answer.content
+    assert "172.17.0.2:5432" not in answer.content
+
+
+def test_fact_identity_unmasked_when_env_false(monkeypatch):
+    monkeypatch.setenv("VAST_MASK_HOST_PORT", "false")
+    ctx = make_ctx(fresh=True, count=10)
+    ctx.engine.host = "172.17.0.2"
+    ctx.engine.port = 5432
+
+    answer = try_answer_with_facts(ctx, "which database are you connected to?")
+
+    assert "172.17.0.2:5432" in answer.content
+    assert "•••:•••" not in answer.content

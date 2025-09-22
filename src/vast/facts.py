@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +81,18 @@ FROM information_schema.tables
 WHERE table_type = 'BASE TABLE'
   AND table_schema NOT IN ('pg_catalog','information_schema','pg_toast');
 """.strip()
+
+
+def _mask_host_port(s: str) -> str:
+    s = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(:\d+)?\b", "•••:•••", s)
+    s = re.sub(r"\b[a-zA-Z0-9_.-]+(:\d+)\b", "•••:•••", s)
+    return s
+
+
+def _maybe_mask(s: str) -> str:
+    if os.getenv("VAST_MASK_HOST_PORT", "true").lower() in {"1", "true", "yes"}:
+        return _mask_host_port(s)
+    return s
 
 
 @dataclass
@@ -354,6 +368,7 @@ def _resolve_db_and_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) ->
         f"- User tables: {count} (excludes pg_catalog, information_schema)",
         f"_Source: facts (identity live SQL; table count {source_note})._",
     ]
+    content = _maybe_mask("\n".join(lines))
 
     logs: List[ExecutionLog] = []
     identity_log = ExecutionLog(
@@ -378,7 +393,7 @@ def _resolve_db_and_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) ->
 
     return FactResolution(
         key="db_and_table_count",
-        content="\n".join(lines),
+        content=content,
         source=source,
         payload=payload,
         intents_consumed={"db_identity", "table_count"},
@@ -400,6 +415,7 @@ def _resolve_db_identity(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
         f"Connected to `{db_name}` at `{host}:{port}` (PostgreSQL {version}).",
         "_Source: facts (live SQL)._",
     ]
+    content = _maybe_mask("\n".join(lines))
 
     payload = {
         "database": db_name,
@@ -428,7 +444,7 @@ def _resolve_db_identity(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
 
     return FactResolution(
         key="db_identity",
-        content="\n".join(lines),
+        content=content,
         source="live-sql",
         payload=payload,
         intents_consumed={"db_identity"},
@@ -446,6 +462,7 @@ def _resolve_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
         f"User tables: {count} (excludes pg_catalog, information_schema).",
         f"_Source: facts (table count {source_note})._",
     ]
+    content = _maybe_mask("\n".join(lines))
 
     logs: List[ExecutionLog] = []
     if log:
@@ -458,7 +475,7 @@ def _resolve_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
 
     return FactResolution(
         key="table_count",
-        content="\n".join(lines),
+        content=content,
         source=source,
         payload=payload,
         intents_consumed={"table_count"},

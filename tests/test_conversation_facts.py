@@ -1,6 +1,6 @@
 import types
 
-from src.vast.facts import FactAnswer, ExecutionLog
+from src.vast.facts import FactAnswer, ExecutionLog, _maybe_mask
 from src.vast.conversation import ConversationContext, MessageRole, VastConversation
 
 
@@ -27,13 +27,18 @@ def test_conversation_short_circuits_for_db_size(monkeypatch):
 
     def fake_try_answer(_runtime, user_text: str):
         if user_text == "how large is it":
+            content = _maybe_mask(
+                "Connected to pagila at 172.17.0.2:5432.\n"
+                "Database size: **118 MB** (123456789 bytes).\n"
+                "_Source: facts (live SQL)._"
+            )
             return FactAnswer(
                 payload={
                     "database_size_pretty": "118 MB",
                     "database_size_bytes": 123_456_789,
                     "source": "facts+live-sql",
                 },
-                content="Connected to pagila at 172.17.0.2:5432.\nDatabase size: **118 MB** (123456789 bytes).\n_Source: facts (live SQL)._",
+                content=content,
                 log_entries=[
                     ExecutionLog(
                         content="Facts: database size lookup",

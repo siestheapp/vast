@@ -6,7 +6,6 @@ A persistent, context-aware database agent that acts as your DBA/CTO
 
 from __future__ import annotations
 import json
-import os
 from pathlib import Path
 import re
 from typing import List, Dict, Any, Optional
@@ -41,8 +40,6 @@ console = Console()
 # Conversation storage path
 CONVERSATION_DIR = Path(".vast/conversations")
 CONVERSATION_DIR.mkdir(parents=True, exist_ok=True)
-
-MASK_HOST_PORT_DEFAULTS = {"1", "true", "yes"}
 
 class MessageRole(Enum):
     USER = "user"
@@ -601,12 +598,10 @@ Remember: You are VAST, with direct database access. Current context:
                 self.last_actions.append(exec_msg.metadata)
                 self.messages.append(exec_msg)
 
-            should_mask = os.getenv("VAST_MASK_HOST_PORT", "true").lower() in MASK_HOST_PORT_DEFAULTS
-            content = _mask_host_port(fact_answer.content) if should_mask else fact_answer.content
-            assistant_msg = Message(role=MessageRole.ASSISTANT, content=content)
+            assistant_msg = Message(role=MessageRole.ASSISTANT, content=fact_answer.content)
             self.messages.append(assistant_msg)
             self._save_session()
-            return content
+            return fact_answer.content
 
         # --- Simple analytics routing (template SQL, still deterministic) ----------
         sections = []
@@ -1185,7 +1180,3 @@ def start_conversation(session_name: str = None):
         console.print("\n[dim]Conversation resumed from last session[/]\n")
     
     return vast
-def _mask_host_port(text: str) -> str:
-    text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(:\d+)?\b", "•••:•••", text)
-    text = re.sub(r"\b[a-zA-Z0-9_.-]+(:\d+)\b", "•••:•••", text)
-    return text

@@ -7,7 +7,7 @@ import math
 import sqlite3
 from array import array
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from uuid import uuid4
@@ -23,7 +23,7 @@ EMBED_DIM_META_KEY = "embedding_dim"
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _ensure_dir() -> None:

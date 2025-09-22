@@ -33,7 +33,7 @@ def test_conversation_short_circuits_for_db_size(monkeypatch):
                     "database_size_bytes": 123_456_789,
                     "source": "facts+live-sql",
                 },
-                content="Database size: **118 MB** (123456789 bytes).\n_Source: facts (live SQL)._",
+                content="Connected to pagila at 172.17.0.2:5432.\nDatabase size: **118 MB** (123456789 bytes).\n_Source: facts (live SQL)._",
                 log_entries=[
                     ExecutionLog(
                         content="Facts: database size lookup",
@@ -56,6 +56,7 @@ def test_conversation_short_circuits_for_db_size(monkeypatch):
 
     assert "118 MB" in response
     assert "bytes" in response
+    assert "•••:•••" in response
     assert not llm_called
 
     exec_entries = [m for m in convo.messages if m.role == MessageRole.EXECUTION]
@@ -66,4 +67,3 @@ def test_conversation_short_circuits_for_db_size(monkeypatch):
     assert "sql" in exec_meta and exec_meta["sql"]
 
     assert convo.last_actions[0]["type"] == "FACT"
-*** End Patch

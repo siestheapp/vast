@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import re
-import textwrap
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
@@ -43,22 +42,7 @@ console = Console()
 CONVERSATION_DIR = Path(".vast/conversations")
 CONVERSATION_DIR.mkdir(parents=True, exist_ok=True)
 
-DB_SIZE_PATTERN = re.compile(
-    r"((?:database|db)\s+size|size\s+of\s+(?:the\s+)?(?:database|db)|"
-    r"how\s+(?:big|large)\s+is\s+(?:the\s+)?(?:database|db)|"
-    r"storage\s+(?:usage|used)\s+by\s+(?:the\s+)?(?:database|db))",
-    re.IGNORECASE,
-)
-
-DB_SIZE_QUERY = textwrap.dedent(
-    """
-    SELECT size_bytes,
-           pg_size_pretty(size_bytes) AS size_pretty
-    FROM (
-        SELECT pg_database_size(current_database()) AS size_bytes
-    ) AS size_info
-    """
-).strip()
+MASK_HOST_PORT_DEFAULTS = {"1", "true", "yes"}
 
 class MessageRole(Enum):
     USER = "user"
@@ -617,10 +601,12 @@ Remember: You are VAST, with direct database access. Current context:
                 self.last_actions.append(exec_msg.metadata)
                 self.messages.append(exec_msg)
 
-            assistant_msg = Message(role=MessageRole.ASSISTANT, content=fact_answer.content)
+            should_mask = os.getenv("VAST_MASK_HOST_PORT", "true").lower() in MASK_HOST_PORT_DEFAULTS
+            content = _mask_host_port(fact_answer.content) if should_mask else fact_answer.content
+            assistant_msg = Message(role=MessageRole.ASSISTANT, content=content)
             self.messages.append(assistant_msg)
             self._save_session()
-            return fact_answer.content
+            return content
 
         # --- Simple analytics routing (template SQL, still deterministic) ----------
         sections = []
@@ -633,10 +619,6 @@ Remember: You are VAST, with direct database access. Current context:
         if any(k in t for k in ("improv", "optimiz", "performance", "slow queries", "health report")):
             report = self._db_health_report()
             sections.append(self._render_db_health_markdown(report))
-
-        if ("size" in t and ("database" in t or "db" in t)) or ("database size" in t):
-            size = self._database_size()
-            sections.append(self._render_database_size_markdown(size))
 
         if sections:
             md = "\n\n---\n\n".join(sections)
@@ -676,80 +658,6 @@ Remember: You are VAST, with direct database access. Current context:
                     "Attempted to create a database dump but it failed.\n- Error: "
                     + (res.get('stderr') or 'unknown error')
                 )
-
-        if DB_SIZE_PATTERN.search(user_input):
-            size_sql = DB_SIZE_QUERY
-            try:
-                rows = safe_execute(size_sql)
-                size_row = rows[0] if rows else None
-                row_dict = self._row_to_dict(size_row)
-                size_bytes = row_dict.get("size_bytes")
-                size_pretty = row_dict.get("size_pretty")
-
-                if size_bytes is None and size_row is not None:
-                    try:
-                        size_bytes = size_row[0]
-                        row_dict.setdefault("size_bytes", size_bytes)
-                    except Exception:
-                        pass
-                if size_pretty is None and size_row is not None:
-                    try:
-                        size_pretty = size_row[1]
-                        row_dict.setdefault("size_pretty", size_pretty)
-                    except Exception:
-                        pass
-
-                metadata = {
-                    "success": True,
-                    "type": "read",
-                    "sql": size_sql,
-                    "rows": [row_dict] if row_dict else [],
-                    "count": 1 if row_dict else 0,
-                }
-                exec_msg = Message(
-                    role=MessageRole.EXECUTION,
-                    content="Executed SQL: database size lookup",
-                    metadata=metadata,
-                )
-                self.last_actions.append(exec_msg.metadata)
-                self.messages.append(exec_msg)
-
-                if size_bytes is None or size_pretty is None:
-                    response = (
-                        "Measured database size but could not parse the result columns.\n\n"
-                        f"```sql\n{size_sql}\n```"
-                    )
-                else:
-                    response = (
-                        "Current database size:\n"
-                        f"- Pretty: {size_pretty}\n"
-                        f"- Bytes: {size_bytes}\n\n"
-                        f"```sql\n{size_sql}\n```"
-                    )
-            except Exception as exc:
-                metadata = {
-                    "success": False,
-                    "type": "read",
-                    "sql": size_sql,
-                    "error": str(exc),
-                }
-                exec_msg = Message(
-                    role=MessageRole.EXECUTION,
-                    content="Executed SQL: database size lookup (failed)",
-                    metadata=metadata,
-                )
-                self.last_actions.append(exec_msg.metadata)
-                self.messages.append(exec_msg)
-                response = (
-                    "Attempted to measure database size but the query failed.\n"
-                    f"- Error: {exc}\n\n"
-                    f"```sql\n{size_sql}\n```"
-                )
-
-            assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)
-            self.messages.append(assistant_msg)
-            self._save_session()
-            return response
 
         # Get LLM response
         response = self._get_llm_response(user_input)
@@ -1036,26 +944,6 @@ Remember: You are VAST, with direct database access. Current context:
             lines.append(f"| {i} | `{fq}` | {fmt_bytes(r['total_bytes'])} | {int(r['approx_rows'])} |")
         return "\n".join(lines)
 
-    def _database_size(self):
-        sql = """
-        SELECT
-          pg_size_pretty(pg_database_size(current_database())) AS database_size_pretty,
-          pg_database_size(current_database())                AS database_size_bytes
-        """
-        with get_engine(readonly=True).begin() as conn:
-            row = conn.execute(text(sql)).mappings().first()
-        return row or {"database_size_pretty": None, "database_size_bytes": None}
-
-    def _render_database_size_markdown(self, row) -> str:
-        pretty = row.get("database_size_pretty") if isinstance(row, dict) else row["database_size_pretty"]
-        bytes_ = row.get("database_size_bytes") if isinstance(row, dict) else row["database_size_bytes"]
-        return (
-            "### Database size\n"
-            "| pretty | bytes |\n"
-            "|--------|-------|\n"
-            f"| {pretty} | {bytes_} |"
-        )
-
     def _table_count(self):
         sql = """
         SELECT COUNT(*) AS table_count
@@ -1297,3 +1185,7 @@ def start_conversation(session_name: str = None):
         console.print("\n[dim]Conversation resumed from last session[/]\n")
     
     return vast
+def _mask_host_port(text: str) -> str:
+    text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(:\d+)?\b", "•••:•••", text)
+    text = re.sub(r"\b[a-zA-Z0-9_.-]+(:\d+)\b", "•••:•••", text)
+    return text

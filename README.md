@@ -48,6 +48,7 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 # Edit .env with your database connection and OpenAI API key
+# Set VAST_MASK_HOST_PORT=false to show real host:port in facts answers
 ```
 
 ## 💬 Usage

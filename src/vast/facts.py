@@ -61,13 +61,20 @@ class SchemaCache:
 
 @dataclass
 class FactsRuntime:
-    database_url: str
+    database_url: Optional[str] = None
     schema_fingerprint: Optional[str] = None
-    schema_cache: SchemaCache = field(default_factory=SchemaCache)
+    schema_cache: Any | None = None
+    engine: Any | None = None
+    db: Any | None = None
+    audit: Optional[List[Any]] = None
+    auto_load_fingerprint: bool = True
 
     def __post_init__(self) -> None:
-        if self.schema_fingerprint is None:
-            # Lazy import to avoid circular dependency
+        if self.schema_cache is None:
+            self.schema_cache = SchemaCache()
+
+        if self.schema_fingerprint is None and self.auto_load_fingerprint:
+            # Lazy import to avoid circular dependency at import time
             from .introspect import schema_fingerprint
 
             try:
@@ -75,11 +82,70 @@ class FactsRuntime:
             except Exception:
                 self.schema_fingerprint = None
 
-    @property
-    def engine(self):
-        return get_engine(readonly=True)
+        if self.engine is None:
+            try:
+                self.engine = get_engine(readonly=True)
+            except Exception:
+                self.engine = None
+
+        if self.audit is None:
+            self.audit = []
+
+    @classmethod
+    def from_context(cls, ctx: Any) -> "FactsRuntime":
+        cache = getattr(ctx, "schema_cache", None)
+        fingerprint = (
+            getattr(ctx, "schema_fingerprint", None)
+            or getattr(ctx, "last_fingerprint", None)
+            or getattr(cache, "fingerprint", None)
+        )
+        return cls(
+            database_url=getattr(ctx, "database_url", None),
+            schema_fingerprint=fingerprint,
+            schema_cache=cache,
+            engine=getattr(ctx, "engine", None),
+            db=getattr(ctx, "db", None),
+            audit=getattr(ctx, "audit", None),
+            auto_load_fingerprint=False,
+        )
+
+    def _schema_cache_is_fresh(self) -> bool:
+        cache = self.schema_cache
+        fingerprint = self.schema_fingerprint
+        if cache is None:
+            return False
+        if hasattr(cache, "is_table_count_fresh"):
+            return cache.is_table_count_fresh(fingerprint)
+        if hasattr(cache, "is_fresh"):
+            try:
+                return bool(cache.is_fresh())
+            except TypeError:
+                return False
+        return False
+
+    def _schema_cache_update(self, count: int) -> None:
+        cache = self.schema_cache
+        if cache is None:
+            return
+        if hasattr(cache, "update_table_count"):
+            cache.update_table_count(count, self.schema_fingerprint)
+            return
+        if hasattr(cache, "table_count"):
+            cache.table_count = count
+        if hasattr(cache, "touch"):
+            cache.touch()
 
     def fetch_db_identity(self) -> Optional[Dict[str, Any]]:
+        if self.engine and hasattr(self.engine, "current_database") and hasattr(self.engine, "server_version"):
+            # Adapter path for lightweight fakes/tests
+            return {
+                "database": self.engine.current_database(),
+                "host": getattr(self.engine, "host", "localhost"),
+                "port": getattr(self.engine, "port", None),
+                "version": self.engine.server_version(),
+                "sql": None,
+            }
+
         sql = """
         SELECT
           current_database()               AS database,
@@ -87,6 +153,8 @@ class FactsRuntime:
           inet_server_port()               AS port,
           version()                        AS version
         """
+        if not self.engine or not hasattr(self.engine, "begin"):
+            return None
         with self.engine.begin() as conn:
             row = conn.execute(text(sql)).mappings().first()
         if row is None:
@@ -96,25 +164,46 @@ class FactsRuntime:
         return payload
 
     def fetch_table_count(self) -> tuple[Optional[int], str, Optional[Dict[str, Any]]]:
-        if self.schema_cache.is_table_count_fresh(self.schema_fingerprint):
-            return self.schema_cache.table_count, "cache", None
+        cache_hit = self._schema_cache_is_fresh()
+        cache = self.schema_cache
 
-        sql = """
-        SELECT COUNT(*) AS table_count
-        FROM information_schema.tables
-        WHERE table_schema NOT IN ('pg_catalog','information_schema');
-        """
-        with self.engine.begin() as conn:
-            row = conn.execute(text(sql)).mappings().first()
-        if row is None:
+        if cache_hit:
+            count = getattr(cache, "table_count", None)
+            try:
+                count = int(count) if count is not None else None
+            except (TypeError, ValueError):
+                count = None
+            return count, "cache", None
+
+        sql = (
+            "SELECT COUNT(*) AS table_count\n"
+            "FROM information_schema.tables\n"
+            "WHERE table_schema NOT IN ('pg_catalog','information_schema');"
+        )
+
+        count: Optional[int] = None
+        if self.db and hasattr(self.db, "scalar"):
+            value = self.db.scalar(sql)
+            if value is not None:
+                count = int(value)
+        elif self.engine and hasattr(self.engine, "begin"):
+            with self.engine.begin() as conn:
+                row = conn.execute(text(sql)).mappings().first()
+            if row is not None:
+                raw = row.get("table_count") if isinstance(row, dict) else row["table_count"]
+                count = int(raw)
+        else:
+            count = None
+
+        if count is None:
             return None, "live-sql", None
-        count = int(row.get("table_count") or row["table_count"])
-        self.schema_cache.update_table_count(count, self.schema_fingerprint)
+
+        self._schema_cache_update(count)
         metadata = {
             "success": True,
             "type": "table_count",
             "sql": sql.strip(),
-            "rows": [dict(row)],
+            "rows": [{"table_count": count}],
             "count": 1,
             "source": "facts",
         }
@@ -136,6 +225,7 @@ class FactResolution:
     key: str
     content: str
     source: str
+    payload: Dict[str, Any]
     intents_consumed: Set[str] = field(default_factory=set)
     log_entries: List[ExecutionLog] = field(default_factory=list)
 
@@ -200,6 +290,14 @@ def _resolve_db_and_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) ->
     version = _format_version(identity.get("version"))
     db_name = identity.get("database") or "unknown"
     source_note = "cache" if source == "cache" else "live SQL"
+    payload = {
+        "database": db_name,
+        "host": host,
+        "port": port,
+        "server_version": version,
+        "table_count": count,
+        "source": "facts" if source == "cache" else "facts+live-sql",
+    }
 
     lines = [
         f"- Database: `{db_name}` (PostgreSQL {version}) at `{host}:{port}`",
@@ -232,6 +330,7 @@ def _resolve_db_and_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) ->
         key="db_and_table_count",
         content="\n".join(lines),
         source=source,
+        payload=payload,
         intents_consumed={"db_identity", "table_count"},
         log_entries=logs,
     )
@@ -251,6 +350,14 @@ def _resolve_db_identity(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
         f"Connected to `{db_name}` at `{host}:{port}` (PostgreSQL {version}).",
         "_Source: facts (live SQL)._",
     ]
+
+    payload = {
+        "database": db_name,
+        "host": host,
+        "port": port,
+        "server_version": version,
+        "source": "facts",
+    }
 
     log = ExecutionLog(
         content="Facts: database identity lookup",
@@ -273,6 +380,7 @@ def _resolve_db_identity(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
         key="db_identity",
         content="\n".join(lines),
         source="live-sql",
+        payload=payload,
         intents_consumed={"db_identity"},
         log_entries=[log],
     )
@@ -293,10 +401,16 @@ def _resolve_table_count(runtime: FactsRuntime, slots: Dict[str, Any]) -> Option
     if log:
         logs.append(ExecutionLog(content=log["content"], metadata=log["metadata"]))
 
+    payload = {
+        "table_count": count,
+        "source": "facts" if source == "cache" else "facts+live-sql",
+    }
+
     return FactResolution(
         key="table_count",
         content="\n".join(lines),
         source=source,
+        payload=payload,
         intents_consumed={"table_count"},
         log_entries=logs,
     )
@@ -326,25 +440,36 @@ FACTS: List[Fact] = [
 
 @dataclass
 class FactAnswer:
+    payload: Dict[str, Any]
     content: str
     log_entries: List[ExecutionLog] = field(default_factory=list)
 
+    def __getitem__(self, key: str) -> Any:
+        return self.payload[key]
 
-def try_answer_with_facts(runtime_or_ctx, user_text: str) -> Optional[Dict[str, Any]]:
-    # --- ADAPTER: allow passing either FactsRuntime or a raw context with engine/db/schema_cache ---
-    runtime = runtime_or_ctx
-    if not hasattr(runtime_or_ctx, "fetch_db_identity"):
-        # construct a minimal FactsRuntime from the ctx-like object
-        runtime = FactsRuntime(
-            engine=runtime_or_ctx.engine,
-            db=runtime_or_ctx.db,
-            schema_cache=runtime_or_ctx.schema_cache,
-            audit=getattr(runtime_or_ctx, "audit", None),
-        )
-    
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.payload.get(key, default)
+
+    def keys(self):
+        return self.payload.keys()
+
+    def items(self):
+        return self.payload.items()
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.payload
+
+
+def try_answer_with_facts(runtime_or_ctx: Any, user_text: str) -> Optional[FactAnswer]:
+    if isinstance(runtime_or_ctx, FactsRuntime):
+        runtime = runtime_or_ctx
+    else:
+        runtime = FactsRuntime.from_context(runtime_or_ctx)
+
     consumed: Set[str] = set()
     chunks: List[str] = []
     logs: List[ExecutionLog] = []
+    payload: Dict[str, Any] = {}
 
     for fact in FACTS:
         if fact.intents & consumed:
@@ -358,9 +483,10 @@ def try_answer_with_facts(runtime_or_ctx, user_text: str) -> Optional[Dict[str, 
         consumed.update(resolution.intents_consumed or fact.intents)
         chunks.append(resolution.content)
         logs.extend(resolution.log_entries)
+        payload.update(resolution.payload)
 
     if not chunks:
         return None
 
     content = "\n\n".join(chunk.strip() for chunk in chunks if chunk.strip())
-    return FactAnswer(content=content, log_entries=logs)
+    return FactAnswer(payload=payload, content=content, log_entries=logs)

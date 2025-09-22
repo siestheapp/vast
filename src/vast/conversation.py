@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import os
+import concurrent.futures
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
@@ -557,8 +559,23 @@ Remember: You are VAST, with direct database access. Current context:
             temperature=0.3,
             max_tokens=2000
         )
-        
+
         return response.choices[0].message.content
+
+    def _generate_ops_plan(self, user_input: str) -> tuple[str, Optional[Dict[str, Any]]]:
+        timeout = int(os.getenv("VAST_PLANNER_TIMEOUT_SEC", "20"))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._get_llm_response, user_input)
+            try:
+                response = future.result(timeout=timeout)
+                return response, None
+            except concurrent.futures.TimeoutError:
+                audit = {
+                    "type": "OPS_PLAN",
+                    "source": "fallback-timeout",
+                    "timeout_sec": timeout,
+                }
+                return OPS_PLAN_FALLBACK, audit
     
     def process(self, user_input: str, auto_execute: bool = False) -> str:
         """
@@ -653,6 +670,24 @@ Remember: You are VAST, with direct database access. Current context:
                     "Attempted to create a database dump but it failed.\n- Error: "
                     + (res.get('stderr') or 'unknown error')
                 )
+
+        if _is_ops_plan_request(user_input):
+            response, audit_meta = self._generate_ops_plan(user_input)
+
+            if audit_meta:
+                exec_msg = Message(
+                    role=MessageRole.EXECUTION,
+                    content="Generated ops plan (timeout fallback)",
+                    metadata=audit_meta,
+                )
+                self.last_actions.append(exec_msg.metadata)
+                self.messages.append(exec_msg)
+
+            response = _ensure_ops_plan_sections(response)
+            assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)
+            self.messages.append(assistant_msg)
+            self._save_session()
+            return response
 
         # Get LLM response
         response = self._get_llm_response(user_input)
@@ -1205,6 +1240,20 @@ OPS_PLAN_HEADINGS = {
     "Rollback:": "- Provide a rollback or remediation strategy if issues arise.",
 }
 
+OPS_PLAN_FALLBACK = (
+    "Plan:\n"
+    "- Outline schema/DDL updates and high-level backfill steps\n"
+    "- Enumerate dependent jobs, views, and contracts\n\n"
+    "Staging:\n"
+    "- Create staging table(s)\n"
+    "- Backfill in staging with idempotent query/jobs\n\n"
+    "Validation:\n"
+    "- Row counts match\n"
+    "- Key metrics (e.g., NULL%, distinct ratios) within thresholds\n\n"
+    "Rollback:\n"
+    "- Drop/rename staging, revert writes, or swap back"
+)
+
 
 def _is_ops_plan_request(user_input: str) -> bool:
     text = user_input.lower()
@@ -1222,4 +1271,10 @@ def _ensure_ops_plan_sections(response: str) -> str:
                 out += "\n\n"
             out += f"{heading}\n{default}"
             lower = out.lower()
+    if "schema" not in lower and "ddl" not in lower:
+        out = out.replace(
+            "Plan:\n",
+            "Plan:\n- Highlight schema/DDL changes required\n",
+            1,
+        )
     return out

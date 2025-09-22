@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from sqlalchemy import text
 
-from .catalog_pg import DATABASE_SIZE_SQL, database_size
+import src.vast.catalog_pg as catalog_pg
 from .db import get_engine
 
 
@@ -70,7 +70,7 @@ SELECT
   version()                        AS version
 """.strip()
 
-DB_SIZE_SQL = DATABASE_SIZE_SQL
+DB_SIZE_SQL = catalog_pg.DATABASE_SIZE_SQL
 
 TABLE_COUNT_SQL = """
 SELECT COUNT(*) AS table_count
@@ -249,7 +249,7 @@ class FactsRuntime:
         if not self.engine or not hasattr(self.engine, "begin"):
             return None, None
 
-        payload = database_size()
+        payload = catalog_pg.database_size()
         if not payload:
             return None, None
 

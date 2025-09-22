@@ -30,7 +30,7 @@ from .system_ops import SystemOperations
 from . import service
 from .knowledge import get_knowledge_store
 from .facts import FactsRuntime, try_answer_with_facts
-from .catalog_pg import largest_tables, seq_scans_by_table, unused_indexes
+import src.vast.catalog_pg as catalog_pg
 
 # Ensure we can access the engine with fallback
 try:
@@ -1023,9 +1023,9 @@ Remember: You are VAST, with direct database access. Current context:
         Returns a dict of result lists. All queries run against the connected DB.
         """
         out = {
-            "largest_tables": largest_tables(limit=10),
-            "seq_scan_heavy": seq_scans_by_table(limit=10),
-            "unused_indexes": unused_indexes(limit=10),
+            "largest_tables": catalog_pg.largest_tables(limit=10),
+            "seq_scan_heavy": catalog_pg.seq_scans_by_table(limit=10),
+            "unused_indexes": catalog_pg.unused_indexes(limit=10),
         }
 
         with get_engine(readonly=True).begin() as conn:

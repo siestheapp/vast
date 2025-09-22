@@ -29,6 +29,7 @@ from .agent import load_or_build_schema_summary
 from .system_ops import SystemOperations
 from . import service
 from .knowledge import get_knowledge_store
+from .facts import FactsRuntime, try_answer_with_facts
 
 # Ensure we can access the engine with fallback
 try:
@@ -589,42 +590,56 @@ Remember: You are VAST, with direct database access. Current context:
         
         # Clear last actions
         self.last_actions = []
-        
-        # --- Strict DB-fact routing (grounded only) ---------------------------------
-        t = user_input.lower()
-        DB_FACT_TRIGGERS = (
-            "how many", "count", "size", "largest", "biggest", "rows",
-            "tables", "indexes", "connected to", "what database", "schema",
-            "columns", "foreign key", "slow queries", "optimiz", "improv",
+
+        # --- Facts routing (deterministic, no LLM) ----------------------------------
+        facts_runtime = FactsRuntime(
+            database_url=self.context.database_url,
+            schema_fingerprint=self.context.last_fingerprint,
         )
-        if any(k in t for k in DB_FACT_TRIGGERS):
-            sections = []
+        if (
+            facts_runtime.schema_fingerprint
+            and self.context.last_fingerprint != facts_runtime.schema_fingerprint
+        ):
+            self.context.last_fingerprint = facts_runtime.schema_fingerprint
 
-            # identity
-            if ("what database" in t) or ("connected to" in t and "database" in t):
-                sections.append(self._render_db_identity_markdown())
+        fact_answer = try_answer_with_facts(facts_runtime, user_input)
+        if fact_answer:
+            for log in fact_answer.log_entries:
+                exec_msg = Message(
+                    role=MessageRole.EXECUTION,
+                    content=log.content,
+                    metadata=log.metadata,
+                )
+                self.last_actions.append(exec_msg.metadata)
+                self.messages.append(exec_msg)
 
-            # largest tables
-            if ("biggest tables" in t) or ("largest" in t and "tables" in t):
-                rows = self._biggest_tables(limit=10)
-                sections.append(self._render_biggest_tables_markdown(rows))
+            assistant_msg = Message(role=MessageRole.ASSISTANT, content=fact_answer.content)
+            self.messages.append(assistant_msg)
+            self._save_session()
+            return fact_answer.content
 
-            # health report / optimization
-            if any(k in t for k in ("improv", "optimiz", "performance", "slow queries", "health report")):
-                report = self._db_health_report()     # runs real queries
-                sections.append(self._render_db_health_markdown(report))
+        # --- Simple analytics routing (template SQL, still deterministic) ----------
+        sections = []
+        t = user_input.lower()
 
-            # database size
-            if ("size" in t and ("database" in t or "db" in t)) or ("database size" in t):
-                size = self._database_size()
-                sections.append(self._render_database_size_markdown(size))
+        if ("biggest tables" in t) or ("largest" in t and "tables" in t):
+            rows = self._biggest_tables(limit=10)
+            sections.append(self._render_biggest_tables_markdown(rows))
 
-            if sections:
-                md = "\n\n---\n\n".join(sections)
-                assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
-                self.messages.append(assistant_msg)
-                self._save_session()
-                return md
+        if any(k in t for k in ("improv", "optimiz", "performance", "slow queries", "health report")):
+            report = self._db_health_report()
+            sections.append(self._render_db_health_markdown(report))
+
+        if ("size" in t and ("database" in t or "db" in t)) or ("database size" in t):
+            size = self._database_size()
+            sections.append(self._render_database_size_markdown(size))
+
+        if sections:
+            md = "\n\n---\n\n".join(sections)
+            assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
+            self.messages.append(assistant_msg)
+            self._save_session()
+            return md
         # ---------------------------------------------------------------------------
 
 # MVP: auto-execute dump requests without waiting for the model
@@ -1037,6 +1052,25 @@ Remember: You are VAST, with direct database access. Current context:
             f"| {pretty} | {bytes_} |"
         )
 
+    def _table_count(self):
+        sql = """
+        SELECT COUNT(*) AS table_count
+        FROM information_schema.tables
+        WHERE table_schema NOT IN ('pg_catalog','information_schema');
+        """
+        with get_engine(readonly=True).begin() as conn:
+            row = conn.execute(text(sql)).mappings().first()
+        return row or {"table_count": None}
+
+    def _render_table_count_markdown(self, row) -> str:
+        count = row.get("table_count") if isinstance(row, dict) else row["table_count"]
+        return (
+            "### Table count\n"
+            "| tables |\n"
+            "|--------|\n"
+            f"| {int(count) if count is not None else 'n/a'} |"
+        )
+
     # --- Live DB identity (no guessing) ---
     def _render_db_identity_markdown(self) -> str:
         sql = """
@@ -1233,7 +1267,7 @@ Remember: You are VAST, with direct database access. Current context:
     def _grounding_evidence_present_this_turn(self) -> bool:
         # Minimal: if any of our grounded helpers ran, we would have pushed an action
         # or you can track a flag when you call get_engine/execute in this turn.
-        return any(a.get("type") in {"sql_query","health_report","biggest_tables","db_identity"}
+        return any(a.get("type") in {"sql_query","health_report","biggest_tables","db_identity","table_count"}
                    for a in (self.last_actions or []))
 
     def _enforce_grounding(self, user_input: str, response: str) -> str:

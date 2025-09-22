@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Callable
 
@@ -46,7 +47,19 @@ def load_or_build_schema_summary(force_refresh: bool = False) -> str:
             pass
     summary = schema_summary()
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_PATH.write_text(json.dumps({"fingerprint": fp, "summary": summary}, indent=2))
+
+    cache_payload: Dict[str, Any] = {}
+    if CACHE_PATH.exists():
+        try:
+            cache_payload = json.loads(CACHE_PATH.read_text())
+        except Exception:
+            cache_payload = {}
+
+    cache_payload["fingerprint"] = fp
+    cache_payload["summary"] = summary
+    cache_payload["updated_at"] = datetime.utcnow().isoformat()
+
+    CACHE_PATH.write_text(json.dumps(cache_payload, indent=2))
     return summary
 
 def _strip_fences(s: str) -> str:

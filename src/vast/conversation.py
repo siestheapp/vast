@@ -1053,7 +1053,7 @@ Remember: You are VAST, with direct database access. Current context:
             out["unused_indexes"] = conn.execute(text("""
                 SELECT
                   s.relname AS table,
-                  i.indexrelname AS index,
+                  ic.relname AS index,
                   pg_relation_size(i.indexrelid) AS index_bytes,
                   COALESCE(x.idx_scan, 0) AS idx_scan
                 FROM pg_class c

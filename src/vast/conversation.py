@@ -570,6 +570,11 @@ Remember: You are VAST, with direct database access. Current context:
                 report = self._db_health_report()     # runs real queries
                 sections.append(self._render_db_health_markdown(report))
 
+            # database size
+            if ("size" in t and ("database" in t or "db" in t)) or ("database size" in t):
+                size = self._database_size()
+                sections.append(self._render_database_size_markdown(size))
+
             if sections:
                 md = "\n\n---\n\n".join(sections)
                 assistant_msg = Message(role=MessageRole.ASSISTANT, content=md)
@@ -628,37 +633,28 @@ Remember: You are VAST, with direct database access. Current context:
             code_blocks.setdefault('bash', [])
             code_blocks['bash'].extend(misclassified)
         
-        # Execute SQL if present and user approves
+        # Execute SQL: auto-run strictly read-only queries, ask for writes/DDL
         if sql_blocks:
             console.print("\n[yellow]📋 Proposed SQL Operations:[/]")
             for i, sql in enumerate(sql_blocks, 1):
                 console.print(Panel(Syntax(sql, "sql"), title=f"Operation {i}"))
-            
-            should_execute = auto_execute
-            if not auto_execute:
-                try:
-                    should_execute = console.input("\n[cyan]Execute these operations? (yes/no): [/]").lower() == 'yes'
-                except EOFError:
-                    # Non-interactive mode
-                    console.print("[dim]Non-interactive mode - skipping execution[/]")
-                    should_execute = False
-            
-            if should_execute:
-                for sql in sql_blocks:
-                    # Determine if this is DDL
-                    is_ddl = any(sql.strip().upper().startswith(cmd) for cmd in ['CREATE', 'ALTER', 'DROP'])
-                    
-                    result = self._execute_sql(sql, allow_ddl=is_ddl)
-                    self.last_actions.append(result)
-                    
-                    if result["success"]:
-                        console.print(f"[green]✓ Executed successfully[/]")
-                        # Convert rows to serializable format
+
+            for sql in sql_blocks:
+                normalized = sql.strip()
+                upper = normalized.upper()
+                is_ddl = any(upper.startswith(cmd) for cmd in ['CREATE', 'ALTER', 'DROP', 'TRUNCATE'])
+                is_write = any(upper.startswith(cmd) for cmd in ['INSERT', 'UPDATE', 'DELETE', 'MERGE'])
+
+                if not is_ddl and not is_write:
+                    # Auto-execute read-only (e.g., SELECT, EXPLAIN, SHOW)
+                    result = self._execute_sql(normalized, allow_ddl=False)
+                    self.last_actions.append(result | {"type": "dml"})
+                    if result.get("success"):
+                        # Store up to 10 rows in conversation log for provenance
                         if "rows" in result and result["rows"]:
                             serializable_rows = []
-                            for row in result["rows"][:10]:  # Limit to 10 rows for storage
+                            for row in result["rows"][:10]:
                                 try:
-                                    # Try to convert to dict
                                     if hasattr(row, '_asdict'):
                                         serializable_rows.append(row._asdict())
                                     elif hasattr(row, '_mapping'):
@@ -670,17 +666,43 @@ Remember: You are VAST, with direct database access. Current context:
                             result["rows"] = serializable_rows
                         exec_msg = Message(
                             role=MessageRole.EXECUTION,
-                            content=f"Executed SQL: {sql[:100]}...",
+                            content=f"Executed read-only SQL: {normalized[:100]}...",
                             metadata=result
                         )
                         self.messages.append(exec_msg)
                     else:
-                        console.print(f"[red]✗ Error: {result['error']}[/]")
-                        response += f"\n\n⚠️ Execution error: {result['error']}"
-                
-                # Refresh schema if DDL was executed
-                if any(a.get("type") == "ddl" for a in self.last_actions):
-                    self._refresh_schema_context()
+                        console.print(f"[red]✗ Error: {result.get('error')}[/]")
+                        response += f"\n\n⚠️ Execution error: {result.get('error')}"
+                    continue
+
+                # Writes/DDL require explicit approval unless auto_execute=True
+                should_execute = auto_execute
+                if not auto_execute:
+                    try:
+                        prompt = "\n[cyan]This operation modifies schema/data. Execute? (yes/no): [/]"
+                        should_execute = console.input(prompt).lower() == 'yes'
+                    except EOFError:
+                        console.print("[dim]Non-interactive mode - skipping write/DDL execution[/]")
+                        should_execute = False
+
+                if should_execute:
+                    result = self._execute_sql(normalized, allow_ddl=is_ddl)
+                    self.last_actions.append(result)
+                    if result.get("success"):
+                        console.print("[green]✓ Executed successfully[/]")
+                        exec_msg = Message(
+                            role=MessageRole.EXECUTION,
+                            content=f"Executed SQL: {normalized[:100]}...",
+                            metadata=result
+                        )
+                        self.messages.append(exec_msg)
+                    else:
+                        console.print(f"[red]✗ Error: {result.get('error')}[/]")
+                        response += f"\n\n⚠️ Execution error: {result.get('error')}"
+
+            # Refresh schema if any DDL executed
+            if any(a.get("type") == "ddl" for a in self.last_actions):
+                self._refresh_schema_context()
         
         # Handle system commands (bash/shell)
         bash_blocks = code_blocks.get('bash', []) + code_blocks.get('system', [])
@@ -876,6 +898,26 @@ Remember: You are VAST, with direct database access. Current context:
             fq = f"{r['schema']}.{r['table']}"
             lines.append(f"| {i} | `{fq}` | {fmt_bytes(r['total_bytes'])} | {int(r['approx_rows'])} |")
         return "\n".join(lines)
+
+    def _database_size(self):
+        sql = """
+        SELECT
+          pg_size_pretty(pg_database_size(current_database())) AS database_size_pretty,
+          pg_database_size(current_database())                AS database_size_bytes
+        """
+        with get_engine(readonly=True).begin() as conn:
+            row = conn.execute(text(sql)).mappings().first()
+        return row or {"database_size_pretty": None, "database_size_bytes": None}
+
+    def _render_database_size_markdown(self, row) -> str:
+        pretty = row.get("database_size_pretty") if isinstance(row, dict) else row["database_size_pretty"]
+        bytes_ = row.get("database_size_bytes") if isinstance(row, dict) else row["database_size_bytes"]
+        return (
+            "### Database size\n"
+            "| pretty | bytes |\n"
+            "|--------|-------|\n"
+            f"| {pretty} | {bytes_} |"
+        )
 
     # --- Live DB identity (no guessing) ---
     def _render_db_identity_markdown(self) -> str:

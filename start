@@ -3,7 +3,14 @@ set -euo pipefail
 
 # Start VAST: ensure Docker + Postgres (pagila) on 5433, venv deps, then run app.
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve script directory even when invoked via symlink
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PROJECT_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 cd "$PROJECT_DIR"
 
 echo "[start] Project: $PROJECT_DIR"
@@ -119,6 +126,77 @@ ensure_container
 ensure_venv
 print_receipt
 
-echo "[start] Launching VAST (Ctrl+C to exit)"
-exec python start_vast.py
+ensure_node() {
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "[start] ERROR: npm is not installed. Please install Node.js (https://nodejs.org)"
+    exit 1
+  fi
+}
+
+ensure_electron_deps() {
+  if [ ! -d "desktop/electron/node_modules" ]; then
+    echo "[start] Installing Electron dependencies (desktop/electron)..."
+    if ! npm --prefix desktop/electron ci >/dev/null 2>&1; then
+      echo "[start] Falling back to npm install..."
+      npm --prefix desktop/electron install >/dev/null
+    fi
+  fi
+}
+
+start_api() {
+  local host="127.0.0.1"
+  local port="${API_PORT:-8000}"
+  echo "[start] Starting API on http://${host}:${port} ..."
+  # Use uvicorn inside venv
+  uvicorn src.vast.api:app --host "$host" --port "$port" --reload &
+  API_PID=$!
+}
+
+wait_for_api() {
+  local host="127.0.0.1"
+  local port="${API_PORT:-8000}"
+  echo -n "[start] Waiting for API healthcheck";
+  for i in $(seq 1 60); do
+    if curl -sSf "http://${host}:${port}/health" >/dev/null 2>&1; then echo " ready"; return 0; fi
+    echo -n "."; sleep 1
+  done
+  echo
+  echo "[start] ERROR: API did not become ready on ${host}:${port}"
+  exit 1
+}
+
+start_electron() {
+  echo "[start] Launching Electron app..."
+  npm --prefix desktop/electron start &
+  ELECTRON_PID=$!
+}
+
+cleanup() {
+  local code=$?
+  echo "\n[start] Shutting down..."
+  if [ -n "${ELECTRON_PID:-}" ] && ps -p "$ELECTRON_PID" >/dev/null 2>&1; then
+    kill "$ELECTRON_PID" >/dev/null 2>&1 || true
+    wait "$ELECTRON_PID" 2>/dev/null || true
+  fi
+  if [ -n "${API_PID:-}" ] && ps -p "$API_PID" >/dev/null 2>&1; then
+    kill "$API_PID" >/dev/null 2>&1 || true
+    wait "$API_PID" 2>/dev/null || true
+  fi
+  exit $code
+}
+
+trap cleanup TERM EXIT
+
+echo "[start] Launching VAST stack (API + Electron + CLI). Use 'exit' in CLI to quit."
+
+ensure_node
+ensure_electron_deps
+start_api
+wait_for_api
+start_electron
+
+# Run CLI in the foreground. When it exits, cleanup trap will run.
+echo "[start] Launching CLI..."
+python start_vast.py
+
 

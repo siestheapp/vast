@@ -13,11 +13,32 @@ from sqlalchemy import text
 from .db import get_engine
 
 
+DATABASE_SIZE_SQL = """
+SELECT
+  pg_database_size(current_database())                 AS size_bytes,
+  pg_size_pretty(pg_database_size(current_database())) AS size_pretty
+""".strip()
+
+
 def _fetch_all(sql: str, params: dict | None = None) -> List[Dict[str, object]]:
     """Execute the SQL against the read-only engine and return plain dict rows."""
     with get_engine(readonly=True).begin() as conn:
         result = conn.execute(text(sql), params or {})
         return [dict(row) for row in result.mappings()]
+
+
+def database_size() -> Dict[str, object]:
+    """Return the current database size in bytes and a pretty string."""
+    rows = _fetch_all(DATABASE_SIZE_SQL)
+    if not rows:
+        return {}
+    row = rows[0]
+    size_bytes = row.get("size_bytes")
+    size_pretty = row.get("size_pretty")
+    return {
+        "size_bytes": int(size_bytes) if size_bytes is not None else 0,
+        "size_pretty": str(size_pretty) if size_pretty is not None else "0 bytes",
+    }
 
 
 def largest_tables(limit: int = 10) -> List[Dict[str, object]]:
@@ -75,4 +96,3 @@ def unused_indexes(limit: int = 10) -> List[Dict[str, object]]:
         """,
         {"limit": limit},
     )
-

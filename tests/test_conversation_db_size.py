@@ -1,16 +1,13 @@
-from types import MethodType, SimpleNamespace
+from types import MethodType
 
 from src.vast.conversation import ConversationContext, MessageRole, VastConversation
 
 
 def test_database_size_query_executes(monkeypatch, tmp_path):
-    recorded = {}
-
-    def fake_safe_execute(sql, *args, **kwargs):
-        recorded["sql"] = sql
-        return [SimpleNamespace(_mapping={"size_bytes": 2048, "size_pretty": "2 kB"})]
-
-    monkeypatch.setattr("src.vast.conversation.safe_execute", fake_safe_execute)
+    monkeypatch.setattr(
+        "src.vast.catalog_pg.database_size",
+        lambda: {"size_bytes": 2048, "size_pretty": "2 kB"},
+    )
 
     conv = VastConversation.__new__(VastConversation)
     conv.session_name = "test_size"
@@ -32,7 +29,6 @@ def test_database_size_query_executes(monkeypatch, tmp_path):
 
     assert "2 kB" in response
     assert "2048" in response
-    assert "pg_database_size" in recorded["sql"]
     assert conv.messages[0].role is MessageRole.USER
     assert conv.messages[1].role is MessageRole.EXECUTION
     assert conv.messages[2].role is MessageRole.ASSISTANT
@@ -40,3 +36,4 @@ def test_database_size_query_executes(monkeypatch, tmp_path):
     metadata = conv.last_actions[0]
     assert metadata["success"] is True
     assert metadata["rows"] == [{"size_bytes": 2048, "size_pretty": "2 kB"}]
+    assert "pg_database_size" in metadata["sql"]

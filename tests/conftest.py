@@ -3,9 +3,13 @@ import sys
 import types
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+load_dotenv(dotenv_path=".env", override=False)
 
 os.environ.setdefault("DATABASE_URL_RO", "postgresql+psycopg://vast_ro:vast_ro_pwd@localhost:5433/pagila")
 os.environ.setdefault("DATABASE_URL_RW", "postgresql+psycopg://vast_ro:vast_ro_pwd@localhost:5433/pagila")

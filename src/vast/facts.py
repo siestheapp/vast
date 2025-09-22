@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from sqlalchemy import text
 
+from .catalog_pg import DATABASE_SIZE_SQL, database_size
 from .db import get_engine
 
 
@@ -69,11 +70,7 @@ SELECT
   version()                        AS version
 """.strip()
 
-DB_SIZE_SQL = """
-SELECT
-  pg_database_size(current_database())                 AS size_bytes,
-  pg_size_pretty(pg_database_size(current_database())) AS size_pretty
-""".strip()
+DB_SIZE_SQL = DATABASE_SIZE_SQL
 
 TABLE_COUNT_SQL = """
 SELECT COUNT(*) AS table_count
@@ -252,23 +249,23 @@ class FactsRuntime:
         if not self.engine or not hasattr(self.engine, "begin"):
             return None, None
 
-        with self.engine.begin() as conn:
-            row = conn.execute(text(DB_SIZE_SQL)).mappings().first()
-        if row is None:
+        payload = database_size()
+        if not payload:
             return None, None
 
-        size_bytes = int(row.get("size_bytes") if isinstance(row, dict) else row["size_bytes"])
-        size_pretty = row.get("size_pretty") if isinstance(row, dict) else row["size_pretty"]
-        payload = {
-            "size_bytes": size_bytes,
-            "size_pretty": size_pretty,
-        }
+        size_bytes = int(payload.get("size_bytes", 0))
+        size_pretty = payload.get("size_pretty")
         metadata = {
             "success": True,
             "type": "FACT",
             "fact_key": "db_size",
             "sql": DB_SIZE_SQL,
-            "rows": [{"size_bytes": size_bytes, "size_pretty": size_pretty}],
+            "rows": [
+                {
+                    "size_bytes": size_bytes,
+                    "size_pretty": size_pretty,
+                }
+            ],
             "source": "facts+live-sql",
         }
         log = {

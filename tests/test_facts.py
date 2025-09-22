@@ -116,7 +116,11 @@ class FakeSizeEngine:
         return Result()
 
 
-def test_db_size_fact_pronoun_only():
+def test_db_size_fact_pronoun_only(monkeypatch):
+    monkeypatch.setattr(
+        "src.vast.catalog_pg.database_size",
+        lambda: {"size_bytes": 123456789, "size_pretty": "118 MB"},
+    )
     ctx = types.SimpleNamespace()
     ctx.engine = FakeSizeEngine(size_bytes=123456789, size_pretty="118 MB")
     ctx.schema_cache = FakeCache(fresh=False, count=5)
@@ -136,7 +140,11 @@ def test_db_size_fact_pronoun_only():
     assert "pg_database_size" in log["sql"]
 
 
-def test_combined_identity_and_size():
+def test_combined_identity_and_size(monkeypatch):
+    monkeypatch.setattr(
+        "src.vast.catalog_pg.database_size",
+        lambda: {"size_bytes": 22334455, "size_pretty": "21 MB"},
+    )
     ctx = types.SimpleNamespace()
     ctx.engine = FakeSizeEngine(size_bytes=22334455, size_pretty="21 MB")
     ctx.schema_cache = FakeCache(fresh=True, count=5)

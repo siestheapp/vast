@@ -30,6 +30,7 @@ from .system_ops import SystemOperations
 from . import service
 from .knowledge import get_knowledge_store
 from .facts import FactsRuntime, try_answer_with_facts
+from .catalog_pg import largest_tables, seq_scans_by_table, unused_indexes
 
 # Ensure we can access the engine with fallback
 try:
@@ -1021,51 +1022,13 @@ Remember: You are VAST, with direct database access. Current context:
         Collect high-signal read-only diagnostics from Postgres.
         Returns a dict of result lists. All queries run against the connected DB.
         """
-        out = {}
+        out = {
+            "largest_tables": largest_tables(limit=10),
+            "seq_scan_heavy": seq_scans_by_table(limit=10),
+            "unused_indexes": unused_indexes(limit=10),
+        }
+
         with get_engine(readonly=True).begin() as conn:
-            # Largest tables by total size
-            out["largest_tables"] = conn.execute(text("""
-                SELECT
-                  n.nspname AS schema,
-                  c.relname AS table,
-                  pg_total_relation_size(c.oid) AS total_bytes,
-                  COALESCE(pg_stat_get_live_tuples(c.oid), 0) AS approx_rows
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE c.relkind = 'r'
-                ORDER BY pg_total_relation_size(c.oid) DESC
-                LIMIT 10
-            """)).mappings().all()
-
-            # Tables with heavy seq scans (likely missing/weak indexes)
-            out["seq_scan_heavy"] = conn.execute(text("""
-                SELECT
-                  relname AS table,
-                  seq_scan,
-                  idx_scan,
-                  n_live_tup
-                FROM pg_stat_user_tables
-                ORDER BY seq_scan DESC
-                LIMIT 10
-            """)).mappings().all()
-
-            # Unused or rarely used indexes (idx_scan = 0)
-            out["unused_indexes"] = conn.execute(text("""
-                SELECT
-                  s.relname AS table,
-                  ic.relname AS index,
-                  pg_relation_size(i.indexrelid) AS index_bytes,
-                  COALESCE(x.idx_scan, 0) AS idx_scan
-                FROM pg_class c
-                JOIN pg_index i ON i.indrelid = c.oid
-                JOIN pg_class ic ON ic.oid = i.indexrelid
-                JOIN pg_stat_user_indexes x ON x.indexrelid = i.indexrelid
-                JOIN pg_stat_user_tables s ON s.relid = c.oid
-                WHERE x.idx_scan = 0
-                ORDER BY pg_relation_size(i.indexrelid) DESC
-                LIMIT 10
-            """)).mappings().all()
-
             # Dead tuples (vacuum pressure)
             out["dead_tuples"] = conn.execute(text("""
                 SELECT
@@ -1126,8 +1089,7 @@ Remember: You are VAST, with direct database access. Current context:
         lines.append("| # | table | size | approx_rows |")
         lines.append("|---|-------|------|-------------|")
         for i, row in enumerate(r["largest_tables"], 1):
-            fq = f"{row['schema']}.{row['table']}"
-            lines.append(f"| {i} | `{fq}` | {fmt_bytes(row['total_bytes'])} | {int(row['approx_rows'])} |")
+            lines.append(f"| {i} | `{row['table']}` | {fmt_bytes(row['total_bytes'])} | {int(row['approx_rows'])} |")
 
         if r["seq_scan_heavy"]:
             lines.append("")
@@ -1135,7 +1097,7 @@ Remember: You are VAST, with direct database access. Current context:
             lines.append("| table | seq_scan | idx_scan | live_rows |")
             lines.append("|-------|----------|----------|-----------|")
             for row in r["seq_scan_heavy"]:
-                lines.append(f"| `{row['table']}` | {row['seq_scan']} | {row['idx_scan']} | {row['n_live_tup']} |")
+                lines.append(f"| `{row['table']}` | {row['seq_scan']} | {row['idx_scan']} | {row['live_rows']} |")
 
         if r["unused_indexes"]:
             lines.append("")

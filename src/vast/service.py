@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
+import re
+
 from sqlalchemy import text
 
 from .agent import plan_sql, plan_sql_with_retry
 from .config import settings
 from .db import get_engine
 from .introspect import list_tables, table_columns
-from .identifier_guard import extract_requested_identifiers
+from .identifier_guard import extract_requested_identifiers, load_schema_cache
 from .agent import load_or_build_schema_summary
-from .sql_params import hydrate_readonly_params, normalize_limit_literal
+from .sql_params import hydrate_readonly_params, normalize_limit_literal, stmt_kind
 from .actions import (
     pg_dump_database,
     pg_restore_list,
@@ -49,7 +51,7 @@ try:
     __all__
 except NameError:
     __all__ = []
-for _name in ("ensure_valid_identifiers", "safe_execute"):
+for _name in ("ensure_valid_identifiers", "safe_execute", "preflight_statements", "apply_statements"):
     if _name not in __all__:
         __all__.append(_name)
 
@@ -203,6 +205,204 @@ def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -
     return normalized_sql
 
 
+def _normalize_statement(sql: str | None) -> str:
+    if not sql:
+        return ""
+    return sql.strip().rstrip(";\n \t")
+
+
+def _clone_schema_map(schema_map: Dict[str, Dict[str, Set[str]]] | None) -> Dict[str, Dict[str, Set[str]]]:
+    if not schema_map:
+        return {}
+    cloned: Dict[str, Dict[str, Set[str]]] = {}
+    for schema, tables in schema_map.items():
+        cloned[schema] = {table: set(cols) for table, cols in tables.items()}
+    return cloned
+
+
+def _relation_known(schema_map: Dict[str, Dict[str, Set[str]]], relation: str) -> bool:
+    if not relation:
+        return False
+    if "." in relation:
+        schema, table = relation.split(".", 1)
+    else:
+        schema, table = "public", relation
+    return table in (schema_map.get(schema) or {})
+
+
+def _existing_relations(schema_map: Dict[str, Dict[str, Set[str]]], relations: Set[str]) -> bool:
+    return bool(relations) and all(_relation_known(schema_map, rel) for rel in relations)
+
+
+_CREATE_TABLE_RE = re.compile(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w\."]+)', re.IGNORECASE)
+
+
+def _parse_create_table(statement: str) -> tuple[str | None, str | None, Set[str]]:
+    match = _CREATE_TABLE_RE.search(statement)
+    if not match:
+        return None, None, set()
+    identifier = match.group(1).replace('"', "").strip()
+    parts = [p for p in identifier.split('.') if p]
+    if not parts:
+        return None, None, set()
+    if len(parts) == 1:
+        schema, table = "public", parts[0]
+    else:
+        schema, table = parts[-2], parts[-1]
+
+    start = statement.find('(')
+    end = statement.rfind(')')
+    if start == -1 or end == -1 or end <= start:
+        return schema, table, set()
+    body = statement[start + 1:end]
+    columns: Set[str] = set()
+    current: list[str] = []
+    depth = 0
+    for ch in body:
+        if ch == ',' and depth == 0:
+            segment = ''.join(current).strip()
+            if segment:
+                col = _extract_column_name(segment)
+                if col:
+                    columns.add(col)
+            current = []
+            continue
+        current.append(ch)
+        if ch == '(':
+            depth += 1
+        elif ch == ')' and depth > 0:
+            depth -= 1
+    tail = ''.join(current).strip()
+    if tail:
+        col = _extract_column_name(tail)
+        if col:
+            columns.add(col)
+    return schema, table, columns
+
+
+def _extract_column_name(definition: str) -> str | None:
+    token = definition.strip().split()[0].strip('"') if definition.strip() else ""
+    skip = {"PRIMARY", "CONSTRAINT", "UNIQUE", "CHECK", "FOREIGN"}
+    if not token or token.upper() in skip:
+        return None
+    return token
+
+
+def _apply_schema_mutation(schema_map: Dict[str, Dict[str, Set[str]]], statement: str) -> None:
+    kind = stmt_kind(statement)
+    if kind != "DDL":
+        return
+    upper = statement.upper()
+    if upper.startswith("CREATE TABLE"):
+        schema, table, columns = _parse_create_table(statement)
+        if schema and table:
+            tables = schema_map.setdefault(schema, {})
+            tables[table] = columns or tables.get(table, set())
+
+
+def preflight_statements(
+    statements: List[str],
+    *,
+    engine=None,
+    schema_map: Dict[str, Dict[str, Set[str]]] | None = None,
+) -> List[str]:
+    """Preflight statements by running DDL then EXPLAINing DML/SELECT before rolling back."""
+
+    notes: List[str] = []
+    if not statements:
+        return notes
+
+    rw_engine = get_engine(readonly=False)
+    ro_engine = engine or get_engine(readonly=True)
+
+    base_map = schema_map
+    if base_map is None:
+        base_map, _ = load_schema_cache(ro_engine)
+    original_schema = _clone_schema_map(base_map)
+    local_schema = _clone_schema_map(base_map)
+
+    conn = rw_engine.connect()
+    trans = conn.begin()
+    try:
+        # Pass 1: execute DDL so dependent statements see new objects.
+        for raw in statements:
+            statement = _normalize_statement(raw)
+            if not statement:
+                continue
+            if stmt_kind(statement) == "DDL":
+                conn.execute(text(statement))
+                notes.append(f"OK DDL {statement.split()[0].upper()} ...")
+                _apply_schema_mutation(local_schema, statement)
+
+        # Pass 2: EXPLAIN DML/SELECT using hydrated params.
+        for raw in statements:
+            statement = _normalize_statement(raw)
+            if not statement:
+                continue
+            kind = stmt_kind(statement)
+            relations = extract_requested_identifiers(statement).get("relations", set())
+            if kind in {"DML", "SELECT"} and _existing_relations(original_schema, relations):
+                ensure_valid_identifiers(
+                    statement,
+                    engine=ro_engine,
+                    schema_map=local_schema,
+                    schema_summary=None,
+                    params={},
+                )
+                explain_sql = f"EXPLAIN (VERBOSE, FORMAT JSON) {statement}"
+                params = hydrate_readonly_params(statement, {}) or {}
+                conn.execute(text(explain_sql), params)
+                notes.append(f"OK EXPLAIN {kind} ...")
+        trans.rollback()
+    except Exception:
+        trans.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return notes
+
+
+def apply_statements(
+    statements: List[str],
+    *,
+    engine=None,
+    schema_map: Dict[str, Dict[str, Set[str]]] | None = None,
+) -> None:
+    """Apply statements in a single transaction."""
+
+    if not statements:
+        return
+
+    rw_engine = get_engine(readonly=False)
+    ro_engine = engine or get_engine(readonly=True)
+
+    base_map = schema_map
+    if base_map is None:
+        base_map, _ = load_schema_cache(ro_engine)
+    original_schema = _clone_schema_map(base_map)
+    local_schema = _clone_schema_map(base_map)
+
+    with rw_engine.begin() as conn:
+        for raw in statements:
+            statement = _normalize_statement(raw)
+            if not statement:
+                continue
+            kind = stmt_kind(statement)
+            relations = extract_requested_identifiers(statement).get("relations", set())
+            if kind in {"DML", "SELECT"} and _existing_relations(original_schema, relations):
+                ensure_valid_identifiers(
+                    statement,
+                    engine=ro_engine,
+                    schema_map=local_schema,
+                    schema_summary=None,
+                    params={},
+                )
+            conn.execute(text(statement))
+            if kind == "DDL":
+                _apply_schema_mutation(local_schema, statement)
+
+
 # --- Operations helpers ---------------------------------------------------
 
 def list_artifacts() -> List[str]:
@@ -345,4 +545,3 @@ def __getattr__(name: str):
         from .conversation import safe_execute as _f
         return _f
     raise AttributeError(name)
-

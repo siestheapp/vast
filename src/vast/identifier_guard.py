@@ -407,6 +407,7 @@ def ensure_valid_identifiers(
     sql: str,
     *,
     engine=None,
+    schema_map: Dict[str, Dict[str, Set[str]]] | None = None,
     schema_summary: str | None = None,
     params: Dict[str, object] | None = None,
     requested: Dict[str, Set[str]] | None = None,
@@ -414,7 +415,10 @@ def ensure_valid_identifiers(
     """Validate SQL identifiers and raise IdentifierValidationError on failure."""
 
     engine = engine or get_engine(readonly=True)
-    schema_cache, _ = load_schema_cache(engine)
+    if schema_map is not None:
+        schema_cache = schema_map
+    else:
+        schema_cache, _ = load_schema_cache(engine)
     if requested is None:
         requested = extract_requested_identifiers(sql)
     ok, details = validate_identifiers(
@@ -425,7 +429,7 @@ def ensure_valid_identifiers(
         requested=requested,
     )
 
-    if not ok:
+    if not ok and schema_map is None:
         schema_cache, _ = load_schema_cache(engine, force_refresh=True)
         ok, details = validate_identifiers(
             sql,

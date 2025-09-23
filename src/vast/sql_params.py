@@ -66,3 +66,23 @@ def normalize_limit_literal(sql: str, params: Dict[str, object] | None) -> str:
         return sql
 
     return _LIMIT_BIND_RE.sub("LIMIT 1", sql)
+
+
+def stmt_kind(sql: str) -> str:
+    """Classify a SQL statement into broad categories."""
+
+    if not sql:
+        return "OTHER"
+
+    match = re.match(r"\s*(\w+)", sql)
+    if not match:
+        return "OTHER"
+
+    token = match.group(1).upper()
+    if token in {"CREATE", "ALTER", "DROP", "TRUNCATE"}:
+        return "DDL"
+    if token in {"INSERT", "UPDATE", "DELETE", "MERGE"}:
+        return "DML"
+    if token in {"SELECT", "WITH"}:
+        return "SELECT"
+    return "OTHER"

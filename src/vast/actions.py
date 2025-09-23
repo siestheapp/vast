@@ -15,6 +15,39 @@ class ActionResult(TypedDict):
 ART_DIR = Path(".vast/artifacts")
 ART_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def build_review_feature_migration() -> list[str]:
+    """Return SQL statements that build the demo review feature."""
+    return [
+        (
+            "CREATE TABLE IF NOT EXISTS public.review ("
+            "  review_id SERIAL PRIMARY KEY,"
+            "  customer_id INT NOT NULL,"
+            "  film_id INT NOT NULL,"
+            "  rating INT CHECK (rating BETWEEN 1 AND 5),"
+            "  comment TEXT,"
+            "  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+            ")"
+        ),
+        (
+            "ALTER TABLE public.review "
+            "  ADD CONSTRAINT fk_review_customer "
+            "  FOREIGN KEY (customer_id) REFERENCES public.customer(customer_id)"
+        ),
+        (
+            "ALTER TABLE public.review "
+            "  ADD CONSTRAINT fk_review_film "
+            "  FOREIGN KEY (film_id) REFERENCES public.film(film_id)"
+        ),
+        "CREATE INDEX IF NOT EXISTS idx_review_created_at ON public.review(created_at)",
+        (
+            "INSERT INTO public.review (customer_id, film_id, rating, comment) "
+            "VALUES (1, 1, 5, 'Excellent film!') "
+            "ON CONFLICT DO NOTHING"
+        ),
+    ]
+
+
 def _run(cmd: str, timeout: int = 900) -> ActionResult:
     p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     return {

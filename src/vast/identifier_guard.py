@@ -629,7 +629,10 @@ def format_identifier_error(details: Dict[str, any]) -> str:
     if details.get("unknown_columns"):
         column_bits = []
         for rel, cols in details["unknown_columns"].items():
-            column_bits.append(f"{rel}: {', '.join(cols)}")
+            if "." in rel:
+                column_bits.append(f"{rel}: {', '.join(cols)}")
+            else:
+                column_bits.append(f"{rel}: {', '.join(cols)}")
         parts.append("Unknown columns → " + "; ".join(column_bits))
     if not parts:
         error_text = details.get("error_text")

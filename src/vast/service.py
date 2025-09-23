@@ -298,6 +298,31 @@ def apply_statements(
             trans.rollback()
             raise
 
+    ro_role = getattr(settings, "read_role", "vast_ro")
+    if ro_role:
+        grant_sql = (
+            f"GRANT SELECT ON TABLE public.review TO {ro_role};"
+        )
+        sequence_grant = (
+            "DO $$\n"
+            "DECLARE seq text;\n"
+            "BEGIN\n"
+            "    SELECT pg_get_serial_sequence('public.review','review_id') INTO seq;\n"
+            "    IF seq IS NOT NULL THEN\n"
+            f"        EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %s TO %I', seq, '{ro_role}');\n"
+            "    END IF;\n"
+            "END$$;"
+        )
+        with _writer_conn() as conn:
+            trans = conn.begin()
+            try:
+                _exec_on(conn, grant_sql)
+                _exec_on(conn, sequence_grant)
+                trans.commit()
+            except Exception:
+                trans.rollback()
+                raise
+
 
 # --- Operations helpers ---------------------------------------------------
 

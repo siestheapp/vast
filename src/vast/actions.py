@@ -30,14 +30,32 @@ def build_review_feature_migration() -> list[str]:
             ")"
         ),
         (
-            "ALTER TABLE public.review "
-            "  ADD CONSTRAINT fk_review_customer "
-            "  FOREIGN KEY (customer_id) REFERENCES public.customer(customer_id)"
+            "DO $$\n"
+            "BEGIN\n"
+            "    IF NOT EXISTS (\n"
+            "        SELECT 1 FROM pg_constraint\n"
+            "        WHERE conname = 'fk_review_customer'\n"
+            "          AND conrelid = 'public.review'::regclass\n"
+            "    ) THEN\n"
+            "        ALTER TABLE public.review\n"
+            "            ADD CONSTRAINT fk_review_customer\n"
+            "            FOREIGN KEY (customer_id) REFERENCES public.customer(customer_id);\n"
+            "    END IF;\n"
+            "END$$;"
         ),
         (
-            "ALTER TABLE public.review "
-            "  ADD CONSTRAINT fk_review_film "
-            "  FOREIGN KEY (film_id) REFERENCES public.film(film_id)"
+            "DO $$\n"
+            "BEGIN\n"
+            "    IF NOT EXISTS (\n"
+            "        SELECT 1 FROM pg_constraint\n"
+            "        WHERE conname = 'fk_review_film'\n"
+            "          AND conrelid = 'public.review'::regclass\n"
+            "    ) THEN\n"
+            "        ALTER TABLE public.review\n"
+            "            ADD CONSTRAINT fk_review_film\n"
+            "            FOREIGN KEY (film_id) REFERENCES public.film(film_id);\n"
+            "    END IF;\n"
+            "END$$;"
         ),
         "CREATE INDEX IF NOT EXISTS idx_review_created_at ON public.review(created_at)",
         (

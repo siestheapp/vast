@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     idle_in_tx_timeout_ms: int = Field(default=8000, alias="IDLE_TX_TIMEOUT_MS")
     max_write_rows: int = Field(default=50_000, alias="MAX_WRITE_ROWS")
     env: str = Field(default="dev", alias="VAST_ENV")
+    read_role: str = Field(default="vast_ro", alias="VAST_READ_ROLE")
 
 
 try:

@@ -118,6 +118,22 @@ def test_preflight_runs_ddl_and_rolls_back(monkeypatch, patch_services, demo_sta
     assert any(stmt.startswith("EXPLAIN") for stmt in executed)
 
 
+def test_preflight_idempotent(monkeypatch, patch_services, demo_statements):
+    ctx = patch_services
+    notes_first = service.preflight_statements(demo_statements)
+    notes_second = service.preflight_statements(demo_statements)
+
+    assert notes_first and notes_second
+    assert ctx["rw_engine"].events == [
+        "BEGIN",
+        "ROLLBACK",
+        "CLOSE",
+        "BEGIN",
+        "ROLLBACK",
+        "CLOSE",
+    ]
+
+
 def test_apply_statements_commits(monkeypatch, patch_services, demo_statements):
     ctx = patch_services
     service.apply_statements(demo_statements)
@@ -126,6 +142,18 @@ def test_apply_statements_commits(monkeypatch, patch_services, demo_statements):
     executed = [stmt.strip() for stmt in ctx["rw_engine"].statements]
     expected = [stmt.strip() for stmt in demo_statements]
     assert executed == expected
+
+
+def test_apply_statements_idempotent(monkeypatch, patch_services, demo_statements):
+    ctx = patch_services
+    service.apply_statements(demo_statements)
+    first_events = list(ctx["rw_engine"].events)
+    first_statements = list(ctx["rw_engine"].statements)
+
+    service.apply_statements(demo_statements)
+
+    assert ctx["rw_engine"].events == first_events + ["BEGIN", "COMMIT", "CLOSE"]
+    assert ctx["rw_engine"].statements == first_statements + first_statements
 
 
 def test_apply_statements_rolls_back_on_error(monkeypatch, demo_statements):

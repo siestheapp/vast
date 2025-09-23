@@ -216,17 +216,18 @@ def plan_sql_with_retry(
                 extra_system_hint=identifier_hint,
             )
 
-            sql = normalize_limit_literal(sql, param_hints)
-            test_params = param_hints or {}
+            normalized_sql = normalize_limit_literal(sql, param_hints)
+            hydrated_params = hydrate_readonly_params(normalized_sql, param_hints or {})
 
             if validator is not None:
-                result_sql = validator(sql, test_params, allow_writes)
+                result_sql = validator(normalized_sql, hydrated_params, allow_writes)
                 if isinstance(result_sql, str):
-                    sql = result_sql
+                    normalized_sql = normalize_limit_literal(result_sql, hydrated_params)
+                    hydrated_params = hydrate_readonly_params(normalized_sql, hydrated_params)
             else:
-                sql = _validate_with_guard(sql, test_params, allow_writes)
+                normalized_sql = _validate_with_guard(normalized_sql, hydrated_params, allow_writes)
 
-            return sql
+            return normalized_sql
 
         except IdentifierValidationError as ide:
             last_error = str(ide)

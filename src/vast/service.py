@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from .agent import plan_sql, plan_sql_with_retry
 from .config import settings
-from .db import safe_execute, get_engine
+from .db import safe_execute as _db_safe_execute, get_engine
 from .introspect import list_tables, table_columns
 from .identifier_guard import (
     ensure_valid_identifiers,  # re-export for tests that patch service.ensure_valid_identifiers
@@ -301,3 +301,7 @@ def repo_write(path: str, content: str, overwrite: bool = False) -> Dict[str, An
     except RepoAccessError as exc:
         raise RuntimeError(str(exc)) from exc
     return {"path": written, "status": "written"}
+def safe_execute(sql: str, params=None, allow_writes: bool = False, force_write: bool = False):
+    """Wrapper that forwards to the core DB safe_execute (patch point for tests)."""
+
+    return _db_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)

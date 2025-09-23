@@ -192,6 +192,76 @@ def _extract_select_alias_columns(sql: str) -> Dict[str, Set[str]]:
     return alias_columns
 
 
+def _extract_select_outputs(sql: str) -> Set[str]:
+    outputs: Set[str] = set()
+    match = re.search(r"(?is)\bselect\b(.*?)\bfrom\b", sql or "")
+    if not match:
+        return outputs
+    select_part = match.group(1)
+    tokens: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for ch in select_part:
+        if ch == ',' and depth == 0:
+            token = ''.join(current).strip()
+            if token:
+                tokens.append(token)
+            current = []
+            continue
+        current.append(ch)
+        if ch == '(':
+            depth += 1
+        elif ch == ')' and depth > 0:
+            depth -= 1
+    tail = ''.join(current).strip()
+    if tail:
+        tokens.append(tail)
+
+    for token in tokens:
+        text = token.strip()
+        if not text:
+            continue
+        alias_match = re.search(r"(?i)\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", text)
+        if alias_match:
+            outputs.add(alias_match.group(1))
+            continue
+        parts = text.split()
+        if len(parts) >= 2 and parts[-1].isidentifier():
+            outputs.add(parts[-1])
+            continue
+        cleaned = text.split('.')[-1]
+        cleaned = _strip_quotes(cleaned)
+        if cleaned == '*':
+            outputs.add('*')
+            continue
+        if cleaned and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", cleaned):
+            outputs.add(cleaned)
+    return outputs
+
+
+def _parse_ctes_from_sql(sql: str, schema_cache: Dict[str, Dict[str, Set[str]]]) -> Dict[str, Set[str]]:
+    parsed: Dict[str, Set[str]] = {}
+    ctes = _extract_ctes(sql)
+    for name, info in ctes.items():
+        explicit = info.get("columns") or set()
+        columns: Set[str] = {col.strip() for col in explicit if col}
+        body = info.get("body", "")
+        outputs = _extract_select_outputs(body)
+        if '*' in outputs:
+            outputs.remove('*')
+            relations = _extract_relations_from_sql(body)
+            if len(relations) == 1:
+                relation = next(iter(relations))
+                if "." in relation:
+                    schema, table = relation.split(".", 1)
+                    table_cols = schema_cache.get(schema, {}).get(table, set())
+                    columns.update(table_cols)
+        columns.update(outputs)
+        if columns:
+            parsed.setdefault(name, set()).update(columns)
+    return parsed
+
+
 def _split_select_list(sql: str) -> list[str]:
     match = re.search(r"(?is)\bselect\b(.*?)\bfrom\b", sql or "")
     if not match:
@@ -259,6 +329,7 @@ def extract_identifiers(sql: str, engine=None, params: Dict[str, object] | None 
         }
 
     engine = engine or get_engine(readonly=True)
+    schema_cache_for_cte, _ = load_schema_cache(engine)
     explain_failed = False
     error_text = ""
     prepared_params = hydrate_readonly_params(sql, params)
@@ -293,11 +364,9 @@ def extract_identifiers(sql: str, engine=None, params: Dict[str, object] | None 
             explicit = info.get("columns") or set()
             if explicit:
                 cte_columns[name] = {col.strip() for col in explicit}
-            else:
-                body = info.get("body", "")
-                cols = set(_split_select_list(body))
-                if cols:
-                    cte_columns[name] = cols
+        fallback_ctes = _parse_ctes_from_sql(sql, schema_cache_for_cte)
+        for name, cols in fallback_ctes.items():
+            cte_columns.setdefault(name, set()).update(cols)
         return {
             "relations": relations,
             "columns": columns,
@@ -388,6 +457,11 @@ def extract_identifiers(sql: str, engine=None, params: Dict[str, object] | None 
             _visit(child, next_relation, next_cte)
 
     _visit(plan)
+
+    if "with" in (sql or "").lower():
+        fallback_ctes = _parse_ctes_from_sql(sql, schema_cache_for_cte)
+        for name, cols in fallback_ctes.items():
+            cte_columns.setdefault(name, set()).update(cols)
 
     return {
         "relations": relations,

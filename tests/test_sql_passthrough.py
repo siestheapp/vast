@@ -42,6 +42,7 @@ def test_accepts_valid_sql_passthrough(monkeypatch):
 
     result = service.plan_and_execute(sql)
     assert result["sql"] == sql
+    assert result.get("passthrough") is True
     assert calls == {"ensure": 1, "execute": 1}
 
 

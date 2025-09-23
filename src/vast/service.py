@@ -281,6 +281,9 @@ def _exec_on(conn, sql: str, params: Dict[str, Any] | None = None):
 
 
 def _first_row(res):
+    first = getattr(res, "first", None)
+    if callable(first):
+        return first()
     fetch = getattr(res, "fetchone", None)
     if callable(fetch):
         return fetch()
@@ -291,12 +294,16 @@ def _first_row(res):
 
 def _log_writer_identity(conn) -> None:
     try:
-        res = conn.execute(text("SELECT current_user, session_user"))
+        exec_driver = getattr(conn, "exec_driver_sql", None)
+        if callable(exec_driver):
+            res = exec_driver("SELECT current_user, session_user")
+        else:
+            res = conn.execute(text("SELECT current_user, session_user"))
         row = _first_row(res)
         if row:
             current = row[0]
             session = row[1] if len(row) > 1 else current
-            logger.info("writer user: %s (session: %s)", current, session)
+            logger.info("writer session: current_user=%s session_user=%s", current, session)
         else:
             logger.warning("Failed to fetch writer identity: empty result")
     except Exception as exc:
@@ -359,45 +366,40 @@ def apply_statements(
     if not statements:
         return
 
-    with _writer_conn() as conn:
+    engine = engine or get_engine(readonly=False)
+    with engine.connect() as conn:
         trans = conn.begin()
-        _log_writer_identity(conn)
         try:
+            _log_writer_identity(conn)
             for raw in statements:
                 statement = _normalize_statement(raw)
                 if not statement:
                     continue
-                _exec_on(conn, statement)
+                exec_driver = getattr(conn, "exec_driver_sql", None)
+                if callable(exec_driver):
+                    exec_driver(statement)
+                else:
+                    _exec_on(conn, statement)
+
+            ro_role = getattr(settings, "read_role", "vast_ro")
+            if ro_role:
+                grant_sql = f"GRANT SELECT ON TABLE public.review TO {ro_role}"
+                conn.exec_driver_sql(grant_sql)
+                seq_row = _first_row(conn.exec_driver_sql(
+                    "SELECT pg_get_serial_sequence('public.review','review_id')"
+                ))
+                seq = None
+                if seq_row:
+                    seq = seq_row[0]
+                if seq:
+                    conn.exec_driver_sql(
+                        f"GRANT USAGE, SELECT ON SEQUENCE {seq} TO {ro_role}"
+                    )
+
             trans.commit()
         except Exception:
             trans.rollback()
             raise
-
-    ro_role = getattr(settings, "read_role", "vast_ro")
-    if ro_role:
-        grant_sql = (
-            f"GRANT SELECT ON TABLE public.review TO {ro_role};"
-        )
-        sequence_grant = (
-            "DO $$\n"
-            "DECLARE seq text;\n"
-            "BEGIN\n"
-            "    SELECT pg_get_serial_sequence('public.review','review_id') INTO seq;\n"
-            "    IF seq IS NOT NULL THEN\n"
-            f"        EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %s TO %I', seq, '{ro_role}');\n"
-            "    END IF;\n"
-            "END$$;"
-        )
-        with _writer_conn() as conn:
-            trans = conn.begin()
-            _log_writer_identity(conn)
-            try:
-                _exec_on(conn, grant_sql)
-                _exec_on(conn, sequence_grant)
-                trans.commit()
-            except Exception:
-                trans.rollback()
-                raise
 
 
 # --- Operations helpers ---------------------------------------------------

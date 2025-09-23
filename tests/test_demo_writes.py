@@ -32,7 +32,22 @@ class DummyConnection:
         self.engine.call_count += 1
         if self.engine.fail_on and self.engine.call_count == self.engine.fail_on:
             raise RuntimeError("boom")
-        return []
+        return DummyResult()
+
+    def exec_driver_sql(self, sql, params=None):
+        if params:
+            sql_text = f"{sql} -- params={params}"
+        else:
+            sql_text = sql
+        self.engine.statements.append(sql_text)
+        self.engine.call_count += 1
+        if self.engine.fail_on and self.engine.call_count == self.engine.fail_on:
+            raise RuntimeError("boom")
+        if "current_user" in sql:
+            return DummyResult([("demo_user", "demo_session")])
+        if "pg_get_serial_sequence" in sql:
+            return DummyResult([("public.review_review_id_seq",)])
+        return DummyResult()
 
     def begin(self):
         self.engine.events.append("BEGIN")
@@ -77,6 +92,23 @@ class DummyEngine:
         self.statements = []
         self.events = []
         self.call_count = 0
+
+
+class DummyResult:
+    def __init__(self, rows=None):
+        self._rows = rows or []
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def first(self):
+        return self.fetchone()
+
+    def scalar(self):
+        row = self.fetchone()
+        if row and len(row) >= 1:
+            return row[0]
+        return None
 
     def connect(self):
         return DummyConnection(self)
@@ -139,9 +171,13 @@ def test_apply_statements_commits(monkeypatch, patch_services, demo_statements):
     service.apply_statements(demo_statements)
 
     assert ctx["rw_engine"].events == ["BEGIN", "COMMIT", "CLOSE"]
-    executed = [stmt.strip() for stmt in ctx["rw_engine"].statements]
+    executed = ctx["rw_engine"].statements
+    assert executed[0].startswith("SELECT current_user")
     expected = [stmt.strip() for stmt in demo_statements]
-    assert executed == expected
+    assert [stmt.strip() for stmt in executed[1:1 + len(demo_statements)]] == expected
+    assert any(stmt.startswith("GRANT SELECT ON TABLE public.review") for stmt in executed)
+    assert any(stmt.startswith("SELECT pg_get_serial_sequence") for stmt in executed)
+    assert any(stmt.startswith("GRANT USAGE, SELECT ON SEQUENCE public.review_review_id_seq") for stmt in executed)
 
 
 def test_apply_statements_idempotent(monkeypatch, patch_services, demo_statements):

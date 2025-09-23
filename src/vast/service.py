@@ -306,25 +306,29 @@ def repo_write(path: str, content: str, overwrite: bool = False) -> Dict[str, An
     return {"path": written, "status": "written"}
 
 
-# --- Test patch points ---------------------------------------------------
+# ==== BEGIN: test patch points re-export (keep top-level) ====
 
+# 1) Re-export the identifier validator so tests can patch:
+from .identifier_guard import ensure_valid_identifiers as ensure_valid_identifiers  # noqa: F401
 
-# Re-export identifier validation for monkeypatching via "src.vast.service.ensure_valid_identifiers"
-ensure_valid_identifiers = _ensure_valid_identifiers
-
-
-# Re-export safe_execute so tests can patch "src.vast.service.safe_execute"
+# 2) Expose a safe_execute proxy so tests can patch service.safe_execute:
 def safe_execute(sql, params=None, allow_writes=False, force_write=False):
-    try:
-        from .conversation import safe_execute as _conv_safe_execute
-        return _conv_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)
-    except Exception:
-        from .db import safe_execute as _db_safe_execute
-        return _db_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)
+    """
+    Proxy to conversation.safe_execute so tests can monkeypatch via
+    'src.vast.service.safe_execute' without importing conversation first.
+    Local import avoids circular imports at module import time.
+    """
+    from .conversation import safe_execute as _conv_safe_execute  # local import to avoid cycles
+    return _conv_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)
 
-
+# Make sure these names are exported explicitly (helps static tools, too):
 try:
-    __all__ = list(set(__all__ + ["ensure_valid_identifiers", "safe_execute"]))
+    __all__
 except NameError:
-    __all__ = ["ensure_valid_identifiers", "safe_execute"]
+    __all__ = []
+for _name in ("ensure_valid_identifiers", "safe_execute"):
+    if _name not in __all__:
+        __all__.append(_name)
+
+# ==== END: test patch points re-export ====
 

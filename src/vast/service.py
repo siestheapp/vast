@@ -93,7 +93,7 @@ def execute_sql(
     summary = load_or_build_schema_summary()
     engine = get_engine(readonly=True)
     requested = extract_requested_identifiers(normalized_sql)
-    ensure_valid_identifiers(
+    _ensure_valid_identifiers(
         normalized_sql,
         engine=engine,
         schema_summary=summary,
@@ -158,7 +158,7 @@ def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -
     summary = load_or_build_schema_summary()
     engine = get_engine(readonly=True)
     requested = extract_requested_identifiers(normalized_sql)
-    ensure_valid_identifiers(
+    _ensure_valid_identifiers(
         normalized_sql,
         engine=engine,
         schema_summary=summary,
@@ -310,8 +310,7 @@ def repo_write(path: str, content: str, overwrite: bool = False) -> Dict[str, An
 
 
 # Re-export identifier validation for monkeypatching via "src.vast.service.ensure_valid_identifiers"
-def ensure_valid_identifiers(*args, **kwargs):
-    return _ensure_valid_identifiers(*args, **kwargs)
+ensure_valid_identifiers = _ensure_valid_identifiers
 
 
 # Re-export safe_execute so tests can patch "src.vast.service.safe_execute"

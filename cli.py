@@ -90,7 +90,8 @@ def ask(
         print(f"[red]{format_identifier_error(err.details)}[/]")
         raise typer.Exit(code=1)
 
-    print(f"[bold]SQL:[/]\n{outcome['sql']}")
+    label = "SQL" if service.looks_like_sql(q) else "Generated SQL"
+    print(f"[bold]{label}:[/]\n{outcome['sql']}")
     print(outcome["execution"])
 
 

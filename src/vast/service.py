@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 from contextlib import contextmanager
@@ -31,8 +32,36 @@ from .repo import list_files as repo_list_files, read_file as repo_read_file, wr
 # Bind into module globals immediately.
 from .identifier_guard import ensure_valid_identifiers as _ensure_valid_identifiers
 
+logger = logging.getLogger(__name__)
+
 # Exported name that tests patch: src.vast.service.ensure_valid_identifiers
 ensure_valid_identifiers = _ensure_valid_identifiers  # bind now
+
+
+# Exported helper for CLI
+SQL_PREFIXES = (
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "WITH",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "GRANT",
+    "REVOKE",
+    "EXPLAIN",
+)
+
+
+def looks_like_sql(text: str | None) -> bool:
+    if not text:
+        return False
+    stripped = text.lstrip()
+    if not stripped:
+        return False
+    first_token = stripped.split(None, 1)[0].upper()
+    return first_token in SQL_PREFIXES
 
 
 # Exported name that tests patch: src.vast.service.safe_execute
@@ -51,7 +80,7 @@ try:
     __all__
 except NameError:
     __all__ = []
-for _name in ("ensure_valid_identifiers", "safe_execute", "preflight_statements", "apply_statements"):
+for _name in ("ensure_valid_identifiers", "safe_execute", "preflight_statements", "apply_statements", "looks_like_sql"):
     if _name not in __all__:
         __all__.append(_name)
 
@@ -157,6 +186,27 @@ def plan_and_execute(
 
     param_hints = params or {}
 
+    if looks_like_sql(nl_request):
+        summary = load_or_build_schema_summary()
+        engine = get_engine(readonly=True)
+        ensure_valid_identifiers(
+            nl_request,
+            engine=engine,
+            schema_summary=summary,
+            params=param_hints,
+        )
+        execution = execute_sql(
+            nl_request,
+            params=param_hints,
+            allow_writes=allow_writes,
+            force_write=force_write,
+        )
+        return {
+            "sql": nl_request,
+            "execution": execution,
+            "passthrough": True,
+        }
+
     if retry:
         sql = plan_sql_with_retry(
             nl_request,
@@ -230,6 +280,29 @@ def _exec_on(conn, sql: str, params: Dict[str, Any] | None = None):
     return conn.execute(statement, params or {})
 
 
+def _first_row(res):
+    fetch = getattr(res, "fetchone", None)
+    if callable(fetch):
+        return fetch()
+    if isinstance(res, list) and res:
+        return res[0]
+    return None
+
+
+def _log_writer_identity(conn) -> None:
+    try:
+        res = conn.execute(text("SELECT current_user, session_user"))
+        row = _first_row(res)
+        if row:
+            current = row[0]
+            session = row[1] if len(row) > 1 else current
+            logger.info("writer user: %s (session: %s)", current, session)
+        else:
+            logger.warning("Failed to fetch writer identity: empty result")
+    except Exception as exc:
+        logger.warning("Failed to fetch writer identity: %s", exc)
+
+
 def preflight_statements(
     statements: List[str],
     *,
@@ -244,6 +317,7 @@ def preflight_statements(
 
     with _writer_conn() as conn:
         trans = conn.begin()
+        _log_writer_identity(conn)
         try:
             # Pass 1: run all DDL so dependent statements become visible.
             for raw in statements:
@@ -287,6 +361,7 @@ def apply_statements(
 
     with _writer_conn() as conn:
         trans = conn.begin()
+        _log_writer_identity(conn)
         try:
             for raw in statements:
                 statement = _normalize_statement(raw)
@@ -315,6 +390,7 @@ def apply_statements(
         )
         with _writer_conn() as conn:
             trans = conn.begin()
+            _log_writer_identity(conn)
             try:
                 _exec_on(conn, grant_sql)
                 _exec_on(conn, sequence_grant)

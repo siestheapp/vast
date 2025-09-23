@@ -109,8 +109,8 @@ def _extract_aliases(sql: str) -> Dict[str, str]:
     return aliases
 
 
-def _extract_ctes(sql: str) -> Dict[str, str]:
-    ctes: Dict[str, str] = {}
+def _extract_ctes(sql: str) -> Dict[str, Dict[str, Set[str] | str]]:
+    ctes: Dict[str, Dict[str, Set[str] | str]] = {}
     if not re.match(r"\s*WITH\b", sql or "", re.I):
         return ctes
 
@@ -129,8 +129,32 @@ def _extract_ctes(sql: str) -> Dict[str, str]:
             break
         name = name_match.group(1)
         pos += len(name)
+        explicit_cols: Set[str] | None = None
         while pos < length and text[pos].isspace():
             pos += 1
+        if pos < length and text[pos] == '(':
+            pos += 1
+            tokens: list[str] = []
+            current: list[str] = []
+            while pos < length:
+                ch = text[pos]
+                if ch == ')':
+                    token = ''.join(current).strip()
+                    if token:
+                        tokens.append(token)
+                    pos += 1
+                    break
+                elif ch == ',':
+                    token = ''.join(current).strip()
+                    if token:
+                        tokens.append(token)
+                    current = []
+                else:
+                    current.append(ch)
+                pos += 1
+            explicit_cols = {token.strip('"') for token in tokens if token}
+            while pos < length and text[pos].isspace():
+                pos += 1
         as_match = re.match(r"AS\s*\(", text[pos:], re.I)
         if not as_match:
             break
@@ -145,7 +169,7 @@ def _extract_ctes(sql: str) -> Dict[str, str]:
                 depth -= 1
             pos += 1
         body = text[body_start : pos - 1]
-        ctes[name] = body
+        ctes[name] = {"columns": explicit_cols or set(), "body": body}
         while pos < length and text[pos].isspace():
             pos += 1
         if pos < length and text[pos] == ',':
@@ -265,10 +289,15 @@ def extract_identifiers(sql: str, engine=None, params: Dict[str, object] | None 
             columns.setdefault(primary, set()).update(select_cols)
         ctes = _extract_ctes(sql)
         cte_columns: Dict[str, Set[str]] = {}
-        for name, body in ctes.items():
-            cols = set(_split_select_list(body))
-            if cols:
-                cte_columns[name] = cols
+        for name, info in ctes.items():
+            explicit = info.get("columns") or set()
+            if explicit:
+                cte_columns[name] = {col.strip() for col in explicit}
+            else:
+                body = info.get("body", "")
+                cols = set(_split_select_list(body))
+                if cols:
+                    cte_columns[name] = cols
         return {
             "relations": relations,
             "columns": columns,
@@ -428,10 +457,7 @@ def validate_identifiers(
     unknown_relations: Set[str] = set()
     unknown_columns: Dict[str, Set[str]] = {}
 
-    base_relations: Set[str] = set()
-    for rel in relations:
-        if "." in rel:
-            base_relations.add(rel)
+    base_relations: Set[str] = {rel for rel in relations if "." in rel}
     for mapped in alias_map.values():
         if isinstance(mapped, str) and "." in mapped:
             base_relations.add(mapped)
@@ -445,28 +471,27 @@ def validate_identifiers(
     for relation_key, cols in columns_map.items():
         if not cols:
             continue
-        storage_key = relation_key
-        target_relation = None
-
         mapped = alias_map.get(relation_key)
-        if mapped:
-            if mapped in cte_columns_map:
-                allowed = cte_columns_map.get(mapped, set())
-                missing = {col for col in cols if col not in allowed}
-                if missing:
-                    unknown_columns.setdefault(relation_key, set()).update(missing)
-                continue
-            target_relation = mapped
-        elif relation_key in cte_columns_map:
+        if mapped and mapped in cte_columns_map:
+            allowed = cte_columns_map.get(mapped, set())
+            missing = {col for col in cols if col not in allowed}
+            if missing:
+                unknown_columns.setdefault(relation_key, set()).update(missing)
+                unknown_columns.setdefault(mapped, set()).update(missing)
+            continue
+
+        if relation_key in cte_columns_map:
             allowed = cte_columns_map.get(relation_key, set())
             missing = {col for col in cols if col not in allowed}
             if missing:
                 unknown_columns.setdefault(relation_key, set()).update(missing)
             continue
+
+        target_relation = None
+        if mapped and isinstance(mapped, str) and "." in mapped:
+            target_relation = mapped
         elif "." in relation_key:
             target_relation = relation_key
-        else:
-            continue
 
         if target_relation and "." in target_relation:
             schema, table = target_relation.split(".", 1)
@@ -477,8 +502,13 @@ def validate_identifiers(
                 continue
             missing = {col for col in cols if col not in allowed}
             if missing:
-                key = storage_key if storage_key in alias_map else f"{schema}.{table}"
-                unknown_columns.setdefault(key, set()).update(missing)
+                if relation_key in alias_map:
+                    unknown_columns.setdefault(relation_key, set()).update(missing)
+                unknown_columns.setdefault(f"{schema}.{table}", set()).update(missing)
+            continue
+
+        if mapped and mapped not in cte_columns_map and "." not in mapped:
+            unknown_columns.setdefault(relation_key, set()).update(cols)
 
     if not columns_map:
         select_cols = _split_select_list(sql)
@@ -497,10 +527,9 @@ def validate_identifiers(
             if missing:
                 unknown_columns[cte_name] = missing
 
-    strict_violation = False
-    if requested_relations:
-        if any(rel in requested_relations for rel in unknown_relations):
-            strict_violation = True
+    strict_violation = bool(unknown_relations or unknown_columns)
+    if requested_relations and any(rel in requested_relations for rel in unknown_relations):
+        strict_violation = True
     if requested_columns:
         for rel, cols in unknown_columns.items():
             requested_cols = requested_columns.get(rel)
@@ -563,13 +592,18 @@ def build_identifier_hint(details: Dict[str, any], schema_cache: Dict[str, Dict[
         lines.append(f"- Unknown table `{relation}` (did you mean: {suggestion_text})")
 
     for relation, cols in details.get("unknown_columns", {}).items():
-        schema, table = relation.split(".", 1)
-        allowed_cols = sorted(schema_cache.get(schema, {}).get(table, set()))
-        for col in cols:
-            suggestions = difflib.get_close_matches(col, allowed_cols, n=3)
-            suggestion_text = ", ".join(suggestions) if suggestions else "no close matches"
+        if "." in relation:
+            schema, table = relation.split(".", 1)
+            allowed_cols = sorted(schema_cache.get(schema, {}).get(table, set()))
+            for col in cols:
+                suggestions = difflib.get_close_matches(col, allowed_cols, n=3)
+                suggestion_text = ", ".join(suggestions) if suggestions else "no close matches"
+                lines.append(
+                    f"- Unknown column `{col}` on `{relation}` (existing: {', '.join(allowed_cols[:10])}; suggestions: {suggestion_text})"
+                )
+        else:
             lines.append(
-                f"- Unknown column `{col}` on `{relation}` (existing: {', '.join(allowed_cols[:10])}; suggestions: {suggestion_text})"
+                f"- Unknown column(s) on relation `{relation}`: {', '.join(cols)}"
             )
 
     return "\n".join(lines)

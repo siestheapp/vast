@@ -9,7 +9,7 @@ from sqlglot import parse
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
-from .config import settings
+from .config import settings, write_url, read_url
 from .audit import audit_event
 
 
@@ -40,11 +40,11 @@ def get_engine(readonly: bool = True) -> Engine:
     global _engine_ro, _engine_rw
     if readonly:
         if _engine_ro is None:
-            _engine_ro = _mk_engine(str(settings.database_url_ro))
+            _engine_ro = _mk_engine(read_url())
         return _engine_ro
     else:
         if _engine_rw is None:
-            _engine_rw = _mk_engine(str(settings.database_url_rw))
+            _engine_rw = _mk_engine(write_url())
         return _engine_rw
 
 

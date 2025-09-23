@@ -176,7 +176,6 @@ def plan_sql(
     if not sql:
         raise RuntimeError("Empty SQL after normalization. Aborting.")
 
-    sql = normalize_limit_literal(sql, param_hints)
     console.print(f"[green]Generated SQL:[/]\n{sql}")
     return sql
 
@@ -216,8 +215,8 @@ def plan_sql_with_retry(
                 extra_system_hint=identifier_hint,
             )
 
-            normalized_sql = normalize_limit_literal(sql, param_hints)
-            hydrated_params = hydrate_readonly_params(normalized_sql, param_hints or {})
+            hydrated_params = hydrate_readonly_params(sql, param_hints or {})
+            normalized_sql = normalize_limit_literal(sql, hydrated_params)
 
             if validator is not None:
                 result_sql = validator(normalized_sql, hydrated_params, allow_writes)

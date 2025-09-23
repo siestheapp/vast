@@ -85,8 +85,12 @@ def _single_statement(sql: str) -> str:
 
 
 def _validate_with_guard(sql: str, params: Dict[str, Any], allow_writes: bool) -> str:
+    # Normalize first so LIMIT :limit becomes LIMIT 1 when missing
     normalized_sql = normalize_limit_literal(sql, params)
     hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    # Ensure hydrated_params reflects the implicit limit when normalized
+    if normalized_sql.upper().endswith("LIMIT 1") and "limit" not in hydrated_params:
+        hydrated_params["limit"] = 1
     engine = get_engine(readonly=True)
     summary = load_or_build_schema_summary()
     requested = extract_requested_identifiers(normalized_sql)
@@ -215,16 +219,18 @@ def plan_sql_with_retry(
                 extra_system_hint=identifier_hint,
             )
 
-            hydrated_params = hydrate_readonly_params(sql, param_hints or {})
-            normalized_sql = normalize_limit_literal(sql, hydrated_params)
+            raw_params: Dict[str, Any] = dict(param_hints or {})
+            # Normalize LIMIT before hydrating params so missing :limit becomes literal 1
+            normalized_sql = normalize_limit_literal(sql, raw_params)
+            hydrated_params = hydrate_readonly_params(normalized_sql, raw_params)
 
             if validator is not None:
                 result_sql = validator(normalized_sql, hydrated_params, allow_writes)
                 if isinstance(result_sql, str):
-                    normalized_sql = normalize_limit_literal(result_sql, hydrated_params)
-                    hydrated_params = hydrate_readonly_params(normalized_sql, hydrated_params)
+                    normalized_sql = normalize_limit_literal(result_sql, raw_params)
+                    hydrated_params = hydrate_readonly_params(normalized_sql, raw_params)
             else:
-                normalized_sql = _validate_with_guard(normalized_sql, hydrated_params, allow_writes)
+                normalized_sql = _validate_with_guard(normalized_sql, raw_params, allow_writes)
 
             return normalized_sql
 

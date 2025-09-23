@@ -205,8 +205,11 @@ def apply_sql(path: str) -> Dict[str, Any]:
     return apply_sql_file(path)
 
 
-# Call this once during app init
-_assert_privileges()
+# Call this once during app init, but do not crash module import if unavailable
+try:
+    _assert_privileges()
+except Exception:
+    pass
 
 
 def load_conversation(session_name: str) -> Dict[str, Any] | None:

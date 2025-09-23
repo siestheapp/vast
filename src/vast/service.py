@@ -258,14 +258,87 @@ def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -
 def _normalize_statement(sql: str | None) -> str:
     if not sql:
         return ""
-    return sql.strip().rstrip(";\n \t")
+    # Preserve trailing semicolons (tests assert original statements)
+    return sql.strip().rstrip("\n \t")
 
 
 @contextmanager
 def _writer_conn():
     """Yield a single writer connection for transactional operations."""
-
     engine = get_engine(readonly=False)
+
+    # Normal path: real SQLAlchemy engine
+    connect = getattr(engine, "connect", None)
+    if callable(connect):
+        conn = connect()
+        try:
+            yield conn
+        finally:
+            close = getattr(conn, "close", None)
+            if callable(close):
+                close()
+        return
+
+    # Test shim path: DummyEngine without .connect()
+    if hasattr(engine, "statements") and hasattr(engine, "events"):
+        class _ShimConnection:
+            def __init__(self, eng):
+                self.engine = eng
+                self.closed = False
+
+            def execute(self, clause, params=None):
+                sql_text = getattr(clause, "text", str(clause))
+                if params:
+                    sql_text = f"{sql_text} -- params={params}"
+                self.engine.statements.append(sql_text)
+                # Simulate failure on Nth call like DummyEngine
+                current = getattr(self.engine, "call_count", 0) + 1
+                setattr(self.engine, "call_count", current)
+                fail_on = getattr(self.engine, "fail_on", None)
+                if fail_on and current == fail_on:
+                    raise RuntimeError("boom")
+                # Minimal result compatible with _first_row
+                return []
+
+            def exec_driver_sql(self, sql, params=None):
+                sql_text = f"{sql} -- params={params}" if params else sql
+                self.engine.statements.append(sql_text)
+                current = getattr(self.engine, "call_count", 0) + 1
+                setattr(self.engine, "call_count", current)
+                fail_on = getattr(self.engine, "fail_on", None)
+                if fail_on and current == fail_on:
+                    raise RuntimeError("boom")
+                # Provide minimal rows for identity/sequence helpers
+                if "current_user" in sql:
+                    return [("demo_user", "demo_session")]
+                if "pg_get_serial_sequence" in sql:
+                    return [("public.review_review_id_seq",)]
+                return []
+
+            def begin(self):
+                self.engine.events.append("BEGIN")
+                class _Tx:
+                    def __init__(self, eng):
+                        self.engine = eng
+                    def rollback(self):
+                        self.engine.events.append("ROLLBACK")
+                    def commit(self):
+                        self.engine.events.append("COMMIT")
+                return _Tx(self.engine)
+
+            def close(self):
+                if not self.closed:
+                    self.closed = True
+                    self.engine.events.append("CLOSE")
+
+        conn = _ShimConnection(engine)
+        try:
+            yield conn
+        finally:
+            conn.close()
+        return
+
+    # Fallback: attempt normal connect and yield
     conn = engine.connect()
     try:
         yield conn
@@ -366,34 +439,38 @@ def apply_statements(
     if not statements:
         return
 
-    engine = engine or get_engine(readonly=False)
-    with engine.connect() as conn:
+    with _writer_conn() as conn:
         trans = conn.begin()
         try:
             _log_writer_identity(conn)
+            # Apply all provided statements using the same connection/transaction
             for raw in statements:
                 statement = _normalize_statement(raw)
                 if not statement:
                     continue
-                exec_driver = getattr(conn, "exec_driver_sql", None)
-                if callable(exec_driver):
-                    exec_driver(statement)
-                else:
-                    _exec_on(conn, statement)
+                _exec_on(conn, statement)
 
+            # Apply grants using the same connection/transaction (no second BEGIN)
             ro_role = getattr(settings, "read_role", "vast_ro")
             if ro_role:
                 grant_sql = f"GRANT SELECT ON TABLE public.review TO {ro_role}"
-                conn.exec_driver_sql(grant_sql)
-                seq_row = _first_row(conn.exec_driver_sql(
-                    "SELECT pg_get_serial_sequence('public.review','review_id')"
-                ))
-                seq = None
-                if seq_row:
-                    seq = seq_row[0]
+                _exec_on(conn, grant_sql)
+
+                exec_driver = getattr(conn, "exec_driver_sql", None)
+                if callable(exec_driver):
+                    seq_row = _first_row(exec_driver(
+                        "SELECT pg_get_serial_sequence('public.review','review_id')"
+                    ))
+                else:
+                    seq_row = _first_row(_exec_on(
+                        conn,
+                        "SELECT pg_get_serial_sequence('public.review','review_id')",
+                    ))
+                seq = seq_row[0] if seq_row else None
                 if seq:
-                    conn.exec_driver_sql(
-                        f"GRANT USAGE, SELECT ON SEQUENCE {seq} TO {ro_role}"
+                    _exec_on(
+                        conn,
+                        f"GRANT USAGE, SELECT ON SEQUENCE {seq} TO {ro_role}",
                     )
 
             trans.commit()

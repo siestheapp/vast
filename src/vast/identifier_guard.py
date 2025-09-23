@@ -180,12 +180,82 @@ def _extract_ctes(sql: str) -> Dict[str, Dict[str, Set[str] | str]]:
     return ctes
 
 
+def _select_clause_text(sql: str) -> str:
+    """Return the text between the TOP-LEVEL SELECT and its FROM.
+
+    Handles WITH ... AS (...) prefixes by skipping CTE bodies.
+    """
+    if not sql:
+        return ""
+    text = sql
+    length = len(text)
+    # Skip CTE list if present
+    m_with = re.match(r"\s*WITH\b", text, re.I)
+    pos = 0
+    if m_with:
+        pos = m_with.end()
+        while pos < length:
+            while pos < length and text[pos].isspace():
+                pos += 1
+            name_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text[pos:])
+            if not name_match:
+                break
+            pos += len(name_match.group(1))
+            while pos < length and text[pos].isspace():
+                pos += 1
+            if pos < length and text[pos] == '(':  # optional column list
+                depth = 1
+                pos += 1
+                while pos < length and depth > 0:
+                    ch = text[pos]
+                    if ch == '(': depth += 1
+                    elif ch == ')': depth -= 1
+                    pos += 1
+                while pos < length and text[pos].isspace():
+                    pos += 1
+            as_match = re.match(r"AS\s*\(", text[pos:], re.I)
+            if not as_match:
+                break
+            pos += as_match.end()
+            depth = 1
+            while pos < length and depth > 0:
+                ch = text[pos]
+                if ch == '(': depth += 1
+                elif ch == ')': depth -= 1
+                pos += 1
+            while pos < length and text[pos].isspace():
+                pos += 1
+            if pos < length and text[pos] == ',':
+                pos += 1
+                continue
+            break
+
+    # Find top-level SELECT token at/after pos
+    m_sel = re.search(r"\bSELECT\b", text[pos:], re.I)
+    if not m_sel:
+        return ""
+    sel_start = pos + m_sel.start()
+    sel_end = pos + m_sel.end()
+
+    # Walk forward to the matching top-level FROM
+    depth = 0
+    i = sel_end
+    while i < length:
+        ch = text[i]
+        if ch == '(':
+            depth += 1
+        elif ch == ')' and depth > 0:
+            depth -= 1
+        # Check for FROM at top-level
+        if depth == 0 and re.match(r"(?i)FROM\b", text[i:]):
+            return text[sel_end:i]
+        i += 1
+    return text[sel_end:]
+
+
 def _extract_select_alias_columns(sql: str) -> Dict[str, Set[str]]:
     alias_columns: Dict[str, Set[str]] = {}
-    match = re.search(r"(?is)\bselect\b(.*?)\bfrom\b", sql or "")
-    if not match:
-        return alias_columns
-    select_part = match.group(1)
+    select_part = _select_clause_text(sql)
     pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)")
     for alias, column in pattern.findall(select_part):
         alias_columns.setdefault(alias, set()).add(column)
@@ -194,10 +264,7 @@ def _extract_select_alias_columns(sql: str) -> Dict[str, Set[str]]:
 
 def _extract_select_outputs(sql: str) -> Set[str]:
     outputs: Set[str] = set()
-    match = re.search(r"(?is)\bselect\b(.*?)\bfrom\b", sql or "")
-    if not match:
-        return outputs
-    select_part = match.group(1)
+    select_part = _select_clause_text(sql)
     tokens: list[str] = []
     current: list[str] = []
     depth = 0
@@ -263,10 +330,7 @@ def _parse_ctes_from_sql(sql: str, schema_cache: Dict[str, Dict[str, Set[str]]])
 
 
 def _split_select_list(sql: str) -> list[str]:
-    match = re.search(r"(?is)\bselect\b(.*?)\bfrom\b", sql or "")
-    if not match:
-        return []
-    select_part = match.group(1)
+    select_part = _select_clause_text(sql)
     tokens: list[str] = []
     current: list[str] = []
     depth = 0
@@ -314,7 +378,7 @@ def _should_analyse(sql: str) -> bool:
     match = re.match(r"\s*([A-Za-z]+)", sql or "")
     if not match:
         return False
-    return match.group(1).upper() in {"SELECT", "INSERT", "UPDATE"}
+    return match.group(1).upper() in {"SELECT", "INSERT", "UPDATE", "WITH"}
 
 
 def extract_identifiers(sql: str, engine=None, params: Dict[str, object] | None = None) -> Dict[str, any]:

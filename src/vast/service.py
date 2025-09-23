@@ -11,6 +11,12 @@ from .agent import plan_sql, plan_sql_with_retry
 from .config import settings
 from .db import safe_execute, get_engine
 from .introspect import list_tables, table_columns
+from .identifier_guard import (
+    ensure_valid_identifiers,  # re-export for tests that patch service.ensure_valid_identifiers
+    extract_requested_identifiers,
+)
+from .agent import load_or_build_schema_summary
+from .sql_params import hydrate_readonly_params, normalize_limit_literal
 from .actions import (
     pg_dump_database,
     pg_restore_list,
@@ -82,7 +88,24 @@ def execute_sql(
     force_write: bool = False,
 ) -> Dict[str, Any]:
     """Run SQL with guardrails and return structured output."""
-    rows = safe_execute(sql, params=params or {}, allow_writes=allow_writes, force_write=force_write)
+    normalized_sql = normalize_limit_literal(sql, params)
+    hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    summary = load_or_build_schema_summary()
+    engine = get_engine(readonly=True)
+    requested = extract_requested_identifiers(normalized_sql)
+    ensure_valid_identifiers(
+        normalized_sql,
+        engine=engine,
+        schema_summary=summary,
+        params=hydrated_params,
+        requested=requested,
+    )
+    rows = safe_execute(
+        normalized_sql,
+        params=hydrated_params or {},
+        allow_writes=allow_writes,
+        force_write=force_write,
+    )
     serialised, dry_run = _serialize_rows(rows)
     return {
         "rows": serialised,
@@ -130,10 +153,23 @@ def plan_and_execute(
 
 def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -> None:
     """Validate generated SQL without forcing writes to run."""
+    normalized_sql = normalize_limit_literal(sql, params)
+    hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    summary = load_or_build_schema_summary()
+    engine = get_engine(readonly=True)
+    requested = extract_requested_identifiers(normalized_sql)
+    ensure_valid_identifiers(
+        normalized_sql,
+        engine=engine,
+        schema_summary=summary,
+        params=hydrated_params,
+        requested=requested,
+    )
     if allow_writes:
-        safe_execute(sql, params=params, allow_writes=True, force_write=False)
+        safe_execute(normalized_sql, params=hydrated_params, allow_writes=True, force_write=False)
     else:
-        safe_execute(sql, params=params, allow_writes=False, force_write=False)
+        safe_execute(normalized_sql, params=hydrated_params, allow_writes=False, force_write=False)
+    return normalized_sql
 
 
 # --- Operations helpers ---------------------------------------------------

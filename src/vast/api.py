@@ -1,4 +1,9 @@
-"""FastAPI application exposing Vast services over HTTP."""
+"""
+FastAPI application exposing Vast services over HTTP
+
+Copyright (c) 2024 Sean Davey. All rights reserved.
+This software is proprietary and confidential. Unauthorized use is prohibited.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import service
+from .identifier_guard import IdentifierValidationError, format_identifier_error
 from .conversation import VastConversation
 from collections.abc import Mapping
 from datetime import datetime
@@ -138,6 +144,8 @@ def create_app() -> FastAPI:
                 force_write=payload.force_write,
             )
             return {"sql": payload.sql, "result": result}
+        except IdentifierValidationError as exc:
+            raise HTTPException(status_code=400, detail=format_identifier_error(exc.details)) from exc
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -154,6 +162,8 @@ def create_app() -> FastAPI:
                 max_retries=payload.max_retries,
             )
             return outcome
+        except IdentifierValidationError as exc:
+            raise HTTPException(status_code=400, detail=format_identifier_error(exc.details)) from exc
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

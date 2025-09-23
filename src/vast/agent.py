@@ -9,8 +9,15 @@ from rich.console import Console
 
 from .config import settings
 from .introspect import list_tables, table_columns, schema_fingerprint
-from .db import safe_execute
+from .db import safe_execute, get_engine
 from .knowledge import get_knowledge_store
+from .identifier_guard import (
+    ensure_valid_identifiers,
+    IdentifierValidationError,
+    extract_requested_identifiers,
+)
+from .sql_params import hydrate_readonly_params, normalize_limit_literal
+from .settings import STRICT_IDENTIFIER_MODE
 
 console = Console()
 CACHE_PATH = Path(".vast/schema_cache.json")
@@ -76,11 +83,32 @@ def _single_statement(sql: str) -> str:
         sql = sql.split(";", 1)[0]
     return sql.strip()
 
+
+def _validate_with_guard(sql: str, params: Dict[str, Any], allow_writes: bool) -> str:
+    normalized_sql = normalize_limit_literal(sql, params)
+    hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    engine = get_engine(readonly=True)
+    summary = load_or_build_schema_summary()
+    requested = extract_requested_identifiers(normalized_sql)
+    ensure_valid_identifiers(
+        normalized_sql,
+        engine=engine,
+        schema_summary=summary,
+        params=hydrated_params,
+        requested=requested,
+    )
+    if allow_writes:
+        safe_execute(normalized_sql, params=hydrated_params, allow_writes=True, force_write=False)
+    else:
+        safe_execute(normalized_sql, params=hydrated_params, allow_writes=False, force_write=False)
+    return normalized_sql
+
 def plan_sql(
     nl_request: str,
     allow_writes: bool = False,
     force_refresh_schema: bool = False,
     param_hints: Dict[str, Any] | None = None,
+    extra_system_hint: str | None = None,
 ) -> str:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY missing. Set it in .env")
@@ -88,6 +116,8 @@ def plan_sql(
     system_prompt = BASE_RULES
     if not allow_writes:
         system_prompt += "\n- For this task, generate ONLY SELECT queries."
+    if extra_system_hint:
+        system_prompt += "\n" + extra_system_hint.strip()
 
     client = OpenAI(api_key=settings.openai_api_key)
     schema_ctx = load_or_build_schema_summary(force_refresh_schema)
@@ -146,6 +176,7 @@ def plan_sql(
     if not sql:
         raise RuntimeError("Empty SQL after normalization. Aborting.")
 
+    sql = normalize_limit_literal(sql, param_hints)
     console.print(f"[green]Generated SQL:[/]\n{sql}")
     return sql
 
@@ -157,69 +188,68 @@ def plan_sql_with_retry(
     param_hints: Dict[str, Any] | None = None,
     max_retries: int = 2,
     validator: Callable[[str, Dict[str, Any], bool], Any] | None = None,
+    extra_system_hint: str | None = None,
 ) -> str:
-    """
-    Plan SQL with automatic retry on execution errors.
-    Tests each generated SQL with a dry run before returning.
-    If the SQL fails, includes the error in context for the next attempt.
-    """
-    last_error = None
+    """Plan SQL with automatic retry on identifier or execution errors."""
+
     original_request = nl_request
-    
+    last_error = None
+    identifier_hint = extra_system_hint
+
     for attempt in range(max_retries):
+        current_request = original_request
+        if last_error and attempt > 0:
+            current_request = (
+                f"{original_request}\n\n"
+                f"IMPORTANT: The previous SQL attempt failed with this error:\n"
+                f"{last_error}\n"
+                f"Please generate corrected SQL that fixes this issue."
+            )
+            console.print(f"[yellow]Retry {attempt + 1}/{max_retries} after error: {last_error}[/]")
+
         try:
-            # Add error context if this is a retry
-            current_request = original_request
-            if last_error and attempt > 0:
-                current_request = (
-                    f"{original_request}\n\n"
-                    f"IMPORTANT: The previous SQL attempt failed with this error:\n"
-                    f"{last_error}\n"
-                    f"Please generate corrected SQL that fixes this issue."
-                )
-                console.print(f"[yellow]Retry {attempt + 1}/{max_retries} after error: {last_error}[/]")
-            
-            # Generate SQL
-            sql = plan_sql(current_request, allow_writes, force_refresh_schema, param_hints)
-            
-            # Validate with dry run (test execution without actually running)
-            # This catches SQL syntax errors, missing tables/columns, etc.
-            try:
-                test_params = param_hints or {}
+            sql = plan_sql(
+                current_request,
+                allow_writes,
+                force_refresh_schema if attempt == 0 else False,
+                param_hints,
+                extra_system_hint=identifier_hint,
+            )
 
-                if validator is not None:
-                    validator(sql, test_params, allow_writes)
-                else:
-                    # Always test as read-only first to validate SQL structure
-                    if allow_writes:
-                        # For writes, test with allow_writes=True but force_write=False (dry run)
-                        result = safe_execute(sql, params=test_params, allow_writes=True, force_write=False)
-                        # Check if it's a DRY RUN response (expected for writes)
-                        if result and isinstance(result, list) and len(result) > 0:
-                            if isinstance(result[0], dict) and "_notice" in result[0]:
-                                # This is expected for write operations - it passed validation
-                                console.print("[dim]SQL validated successfully (dry run for write operation)[/]")
-                            else:
-                                # For SELECT queries that return actual results
-                                console.print("[dim]SQL validated successfully[/]")
-                    else:
-                        # For read-only queries, execute normally
-                        safe_execute(sql, params=test_params, allow_writes=False, force_write=False)
-                        console.print("[dim]SQL validated successfully[/]")
+            sql = normalize_limit_literal(sql, param_hints)
+            test_params = param_hints or {}
 
-                return sql
+            if validator is not None:
+                result_sql = validator(sql, test_params, allow_writes)
+                if isinstance(result_sql, str):
+                    sql = result_sql
+            else:
+                sql = _validate_with_guard(sql, test_params, allow_writes)
 
-            except Exception as validation_error:
-                # SQL execution failed - will retry with error context
-                raise validation_error
-            
-        except Exception as e:
-            last_error = str(e)
+            return sql
+
+        except IdentifierValidationError as ide:
+            last_error = str(ide)
+            if STRICT_IDENTIFIER_MODE and ide.details.get("strict_violation"):
+                raise
+            hint = ide.hint
+            limit_hint = "Use a literal LIMIT 1 when returning a single row."
+            combined_hint = hint or ""
+            if limit_hint not in combined_hint:
+                combined_hint = f"{combined_hint}\n{limit_hint}" if combined_hint else limit_hint
+            if identifier_hint:
+                if combined_hint:
+                    if combined_hint not in identifier_hint:
+                        identifier_hint = f"{identifier_hint}\n{combined_hint}"
+            else:
+                identifier_hint = combined_hint or limit_hint
+            continue
+        except Exception as exc:
+            last_error = str(exc)
             if attempt == max_retries - 1:
-                # Final attempt failed, raise the error
-                console.print(f"[red]All {max_retries} attempts failed. Final error: {e}[/]")
-                raise RuntimeError(f"Failed to generate valid SQL after {max_retries} attempts. Last error: {e}")
-            # Continue to next retry
-    
-    # Should never reach here, but just in case
+                console.print(f"[red]All {max_retries} attempts failed. Final error: {exc}[/]")
+                raise RuntimeError(
+                    f"Failed to generate valid SQL after {max_retries} attempts. Last error: {exc}"
+                ) from exc
+
     raise RuntimeError(f"Unexpected error in retry logic after {max_retries} attempts")

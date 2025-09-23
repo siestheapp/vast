@@ -2,6 +2,9 @@
 """
 VAST Conversational CLI
 A persistent, intelligent database agent that remembers everything
+
+Copyright (c) 2024 Sean Davey. All rights reserved.
+This software is proprietary and confidential. Unauthorized use is prohibited.
 """
 
 import sys

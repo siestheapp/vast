@@ -1,9 +1,18 @@
+"""
+VAST CLI Module
+Command-line interface for VAST operations
+
+Copyright (c) 2024 Sean Davey. All rights reserved.
+This software is proprietary and confidential. Unauthorized use is prohibited.
+"""
+
 import json
 import typer
 from rich import print
 from rich.table import Table
 
 from src.vast import service
+from src.vast.identifier_guard import IdentifierValidationError, format_identifier_error
 
 app = typer.Typer(help="Vast1 — AI DB operator (MVP)")
 
@@ -46,7 +55,12 @@ def run(
     force_write: bool = typer.Option(False, "--force-write", help="Actually execute write (otherwise DRY RUN)"),
 ):
     p = _parse_params(params)
-    result = service.execute_sql(sql, params=p, allow_writes=write, force_write=force_write)
+    try:
+        result = service.execute_sql(sql, params=p, allow_writes=write, force_write=force_write)
+    except IdentifierValidationError as err:
+        print(f"[red]{format_identifier_error(err.details)}[/]")
+        raise typer.Exit(code=1)
+
     print(result)
 
 @app.command()
@@ -60,15 +74,19 @@ def ask(
     max_retries: int = typer.Option(2, "--max-retries", help="Maximum retry attempts (default: 2)"),
 ):
     p = _parse_params(params)
-    outcome = service.plan_and_execute(
-        q,
-        params=p,
-        allow_writes=write,
-        force_write=force_write,
-        refresh_schema=refresh_schema,
-        retry=not no_retry,
-        max_retries=max_retries,
-    )
+    try:
+        outcome = service.plan_and_execute(
+            q,
+            params=p,
+            allow_writes=write,
+            force_write=force_write,
+            refresh_schema=refresh_schema,
+            retry=not no_retry,
+            max_retries=max_retries,
+        )
+    except IdentifierValidationError as err:
+        print(f"[red]{format_identifier_error(err.details)}[/]")
+        raise typer.Exit(code=1)
 
     print(f"[bold]SQL:[/]\n{outcome['sql']}")
     print(outcome["execution"])

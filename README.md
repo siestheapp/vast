@@ -132,11 +132,19 @@ User ↔️ Conversation Engine ↔️ Database
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+This is proprietary software owned by Sean Davey. All rights reserved. 
+No contributions or modifications are permitted without express written authorization.
 
 ## 📄 License
 
-MIT License - see LICENSE file for details
+**PROPRIETARY SOFTWARE - ALL RIGHTS RESERVED**
+
+This software and all associated intellectual property is owned exclusively by Sean Davey. 
+See [LICENSE](LICENSE) and [COPYRIGHT](COPYRIGHT) files for complete terms and conditions.
+
+**NO LICENSE GRANTED** - This software is provided for personal use and evaluation only. 
+Any reproduction, distribution, or commercial use is strictly prohibited without 
+express written permission from Sean Davey.
 
 ## 🙏 Acknowledgments
 

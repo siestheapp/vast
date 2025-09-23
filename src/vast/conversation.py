@@ -25,12 +25,20 @@ from .config import settings
 from .db import get_engine, safe_execute
 from sqlalchemy import text
 from .introspect import list_tables, table_columns, schema_fingerprint
-from .agent import load_or_build_schema_summary
+from .agent import load_or_build_schema_summary, plan_sql
 from .system_ops import SystemOperations
 from . import service
 from .knowledge import get_knowledge_store
 from .facts import FactsRuntime, try_answer_with_facts
 import src.vast.catalog_pg as catalog_pg
+from .identifier_guard import (
+    IdentifierValidationError,
+    ensure_valid_identifiers,
+    format_identifier_error,
+    extract_requested_identifiers,
+)
+from .sql_params import hydrate_readonly_params, normalize_limit_literal
+from .settings import STRICT_IDENTIFIER_MODE
 
 # Ensure we can access the engine with fallback
 try:
@@ -425,35 +433,135 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
         
         return args
     
-    def _execute_sql(self, sql: str, allow_ddl: bool = False) -> Dict[str, Any]:
+    def _execute_sql(
+        self,
+        sql: str,
+        allow_ddl: bool = False,
+        *,
+        user_input: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Execute SQL and return results with safety checks"""
         try:
+            executed_sql = sql.strip()
+            replanned = False
+            params_for_sql: Dict[str, Any] | None = None
+
+            operation = re.match(r"^\s*([A-Za-z]+)", executed_sql or "")
+            op = operation.group(1).upper() if operation else ""
+            allow_writes = op in {"INSERT", "UPDATE"}
+
+            if op in {"SELECT", "INSERT", "UPDATE"} and not allow_ddl:
+                executed_sql = normalize_limit_literal(executed_sql, None)
+                if op == "SELECT":
+                    params_for_sql = hydrate_readonly_params(executed_sql, None)
+                requested = extract_requested_identifiers(executed_sql)
+
+                schema_summary = self.context.schema_summary
+                engine = self.engine or get_engine(readonly=True)
+                try:
+                    ensure_valid_identifiers(
+                        executed_sql,
+                        engine=engine,
+                        schema_summary=schema_summary,
+                        params=params_for_sql,
+                        requested=requested,
+                    )
+                except IdentifierValidationError as err:
+                    if STRICT_IDENTIFIER_MODE and err.details.get("strict_violation"):
+                        msg = format_identifier_error(err.details)
+                        return {
+                            "success": False,
+                            "error": msg,
+                            "sql": executed_sql,
+                            "identifier_validation": err.details,
+                            "hint": err.hint,
+                            "replanned": False,
+                        }
+                    replanned_sql = None
+                    if user_input:
+                        replanned_sql = self._retry_sql_with_hint(
+                            user_input,
+                            executed_sql,
+                            err,
+                            allow_writes,
+                        )
+
+                    if replanned_sql and replanned_sql.strip() != executed_sql:
+                        try:
+                            updated_sql = normalize_limit_literal(replanned_sql.strip(), None)
+                            replanned_match = re.match(r"^\s*([A-Za-z]+)", updated_sql or "")
+                            replanned_op = replanned_match.group(1).upper() if replanned_match else ""
+                            params_for_sql = (
+                                hydrate_readonly_params(updated_sql, None)
+                                if replanned_op == "SELECT"
+                                else None
+                            )
+                            requested = extract_requested_identifiers(updated_sql)
+                            ensure_valid_identifiers(
+                                updated_sql,
+                                engine=engine,
+                                schema_summary=schema_summary,
+                                params=params_for_sql,
+                                requested=requested,
+                            )
+                            executed_sql = updated_sql
+                            replanned = True
+                            console.print("[yellow]Replanned SQL with identifier hint.[/]")
+                        except IdentifierValidationError as retry_err:
+                            msg = format_identifier_error(retry_err.details)
+                            return {
+                                "success": False,
+                                "error": msg,
+                                "sql": replanned_sql.strip(),
+                                "identifier_validation": retry_err.details,
+                                "hint": retry_err.hint,
+                                "replanned": True,
+                            }
+                    else:
+                        msg = format_identifier_error(err.details)
+                        return {
+                            "success": False,
+                            "error": msg,
+                            "sql": executed_sql,
+                            "identifier_validation": err.details,
+                            "hint": err.hint,
+                            "replanned": False,
+                        }
+
             # For DDL operations, we need different safety checks
             if allow_ddl:
                 # DDL operations (CREATE, ALTER, DROP)
-                with self.engine.begin() as conn:
-                    result = conn.execute(text(sql))
+                ddl_engine = self.engine or get_engine(readonly=False)
+                with ddl_engine.begin() as conn:
+                    result = conn.execute(text(executed_sql))
                     return {
                         "success": True,
                         "type": "ddl",
                         "message": "DDL operation completed successfully",
-                        "sql": sql
+                        "sql": executed_sql,
                     }
             else:
                 # DML operations (SELECT, INSERT, UPDATE)
-                rows = safe_execute(sql, allow_writes=True, force_write=True)
+                rows = safe_execute(
+                    executed_sql,
+                    params=params_for_sql,
+                    allow_writes=True,
+                    force_write=True,
+                )
                 return {
                     "success": True,
                     "type": "dml",
                     "rows": rows,
                     "count": len(rows) if isinstance(rows, list) else 0,
-                    "sql": sql
+                    "sql": executed_sql,
+                    "replanned": replanned,
                 }
         except Exception as e:
             return {
                 "success": False,
                 "error": str(e),
-                "sql": sql
+                "sql": executed_sql,
+                "replanned": replanned,
             }
 
     def _row_to_dict(self, row: Any) -> Dict[str, Any]:
@@ -481,7 +589,32 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
             return dict(row)
         except Exception:
             return {}
-    
+
+    def _retry_sql_with_hint(
+        self,
+        user_input: str,
+        original_sql: str,
+        error: IdentifierValidationError,
+        allow_writes: bool,
+    ) -> Optional[str]:
+        hint = error.hint or self.context.schema_summary
+        prompt = (
+            f"{user_input}\n\n"
+            f"The previous SQL attempt `{original_sql}` failed because: {error}.\n"
+            "Generate corrected SQL that only references existing tables and columns."
+        )
+        try:
+            console.print("[yellow]Attempting to repair SQL with planner hint...[/]")
+            return plan_sql(
+                prompt,
+                allow_writes=allow_writes,
+                force_refresh_schema=True,
+                extra_system_hint=hint,
+            )
+        except Exception as exc:
+            console.print(f"[red]Identifier replan failed: {exc}[/]")
+            return None
+
     def _get_llm_response(self, user_input: str) -> str:
         """Get response from LLM with full conversation context"""
         # Build messages for API
@@ -726,7 +859,7 @@ Remember: You are VAST, with direct database access. Current context:
 
                 if not is_ddl and not is_write:
                     # Auto-execute read-only (e.g., SELECT, EXPLAIN, SHOW)
-                    result = self._execute_sql(normalized, allow_ddl=False)
+                    result = self._execute_sql(normalized, allow_ddl=False, user_input=user_input)
                     self.last_actions.append(result | {"type": "dml"})
                     if result.get("success"):
                         # Store up to 10 rows in conversation log for provenance
@@ -765,7 +898,7 @@ Remember: You are VAST, with direct database access. Current context:
                         should_execute = False
 
                 if should_execute:
-                    result = self._execute_sql(normalized, allow_ddl=is_ddl)
+                    result = self._execute_sql(normalized, allow_ddl=is_ddl, user_input=user_input)
                     self.last_actions.append(result)
                     if result.get("success"):
                         console.print("[green]✓ Executed successfully[/]")

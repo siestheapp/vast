@@ -1,5 +1,7 @@
 from __future__ import annotations
+import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Callable
@@ -8,7 +10,7 @@ from openai import OpenAI
 from rich.console import Console
 
 from .config import settings
-from .introspect import list_tables, table_columns, schema_fingerprint
+from .introspect import list_tables, table_columns
 from .db import safe_execute, get_engine
 from .knowledge import get_knowledge_store
 from .identifier_guard import (
@@ -20,7 +22,12 @@ from .sql_params import hydrate_readonly_params, normalize_limit_literal
 from .settings import STRICT_IDENTIFIER_MODE
 
 console = Console()
+logger = logging.getLogger(__name__)
 CACHE_PATH = Path(".vast/schema_cache.json")
+_SCHEMA_STATE: Dict[str, Any] = {
+    "schema_summary": None,
+    "schema_fingerprint": None,
+}
 
 BASE_RULES = """You are Vast1, an AI database operator.
 
@@ -43,18 +50,47 @@ def schema_summary(max_tables: int = 18, max_cols_per_table: int = 12) -> str:
         lines.append(f"{t['table_schema']}.{t['table_name']}({colnames})")
     return "\n".join(lines)
 
-def load_or_build_schema_summary(force_refresh: bool = False) -> str:
-    fp = schema_fingerprint()
-    if not force_refresh and CACHE_PATH.exists():
-        try:
-            data = json.loads(CACHE_PATH.read_text())
-            if data.get("fingerprint") == fp and "summary" in data:
-                return data["summary"]
-        except Exception:
-            pass
-    summary = schema_summary()
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _normalize_columns_for_fingerprint(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for col in cols:
+        normalized.append(
+            {
+                "name": col.get("column_name"),
+                "type": col.get("data_type"),
+                "nullable": col.get("is_nullable"),
+                "default": col.get("column_default"),
+            }
+        )
+    return sorted(normalized, key=lambda item: (item["name"] or ""))
 
+
+def _compute_schema_fingerprint() -> str:
+    snapshot: List[Dict[str, Any]] = []
+    for tbl in list_tables():
+        schema_name = tbl["table_schema"]
+        table_name = tbl["table_name"]
+        cols = table_columns(schema_name, table_name)
+        snapshot.append(
+            {
+                "relation": f"{schema_name}.{table_name}",
+                "columns": _normalize_columns_for_fingerprint(cols),
+            }
+        )
+    snapshot.sort(key=lambda item: item["relation"])
+    payload = json.dumps(snapshot, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def refresh_schema_summary() -> Dict[str, Any]:
+    summary = schema_summary()
+    fingerprint = _compute_schema_fingerprint()
+
+    new_state = {
+        "schema_summary": summary,
+        "schema_fingerprint": fingerprint,
+    }
+
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     cache_payload: Dict[str, Any] = {}
     if CACHE_PATH.exists():
         try:
@@ -62,12 +98,67 @@ def load_or_build_schema_summary(force_refresh: bool = False) -> str:
         except Exception:
             cache_payload = {}
 
-    cache_payload["fingerprint"] = fp
-    cache_payload["summary"] = summary
-    cache_payload["updated_at"] = datetime.utcnow().isoformat()
+    cache_payload.update(
+        {
+            "summary": summary,
+            "fingerprint": fingerprint,
+            "schema_fingerprint": fingerprint,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+    )
 
-    CACHE_PATH.write_text(json.dumps(cache_payload, indent=2))
-    return summary
+    try:
+        CACHE_PATH.write_text(json.dumps(cache_payload, indent=2))
+    except Exception as exc:
+        logger.warning("Failed to persist schema cache: %s", exc)
+
+    _SCHEMA_STATE.update(new_state)
+    return dict(_SCHEMA_STATE)
+
+
+def _load_cached_schema_state() -> Dict[str, Any] | None:
+    if CACHE_PATH.exists():
+        try:
+            data = json.loads(CACHE_PATH.read_text())
+        except Exception:
+            return None
+        summary = data.get("summary")
+        fingerprint = data.get("schema_fingerprint") or data.get("fingerprint")
+        if summary and fingerprint:
+            _SCHEMA_STATE.update({
+                "schema_summary": summary,
+                "schema_fingerprint": fingerprint,
+            })
+            return dict(_SCHEMA_STATE)
+    return None
+
+
+def _ensure_schema_state(force_refresh: bool = False) -> Dict[str, Any]:
+    if force_refresh:
+        return refresh_schema_summary()
+
+    if _SCHEMA_STATE.get("schema_summary") and _SCHEMA_STATE.get("schema_fingerprint"):
+        return dict(_SCHEMA_STATE)
+
+    cached = _load_cached_schema_state()
+    if cached:
+        return cached
+
+    return refresh_schema_summary()
+
+
+def load_or_build_schema_summary(force_refresh: bool = False) -> str:
+    state = _ensure_schema_state(force_refresh=force_refresh)
+    return state["schema_summary"]
+
+
+def get_schema_fingerprint(force_refresh: bool = False) -> str:
+    state = _ensure_schema_state(force_refresh=force_refresh)
+    return state["schema_fingerprint"]
+
+
+def get_schema_state(force_refresh: bool = False) -> Dict[str, Any]:
+    return dict(_ensure_schema_state(force_refresh=force_refresh))
 
 def _strip_fences(s: str) -> str:
     s = s.strip()
@@ -113,9 +204,16 @@ def plan_sql(
     force_refresh_schema: bool = False,
     param_hints: Dict[str, Any] | None = None,
     extra_system_hint: str | None = None,
+    schema_state: Dict[str, Any] | None = None,
 ) -> str:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY missing. Set it in .env")
+
+    if force_refresh_schema or schema_state is None:
+        schema_state = get_schema_state(force_refresh=force_refresh_schema)
+
+    schema_context = schema_state["schema_summary"]
+    schema_fp = schema_state["schema_fingerprint"]
 
     system_prompt = BASE_RULES
     if not allow_writes:
@@ -124,7 +222,7 @@ def plan_sql(
         system_prompt += "\n" + extra_system_hint.strip()
 
     client = OpenAI(api_key=settings.openai_api_key)
-    schema_ctx = load_or_build_schema_summary(force_refresh_schema)
+    schema_ctx = f"schema_fingerprint={schema_fp}\n{schema_context}".strip()
 
     user_blocks = [
         f"Database schema:\n{schema_ctx}",
@@ -198,8 +296,35 @@ def plan_sql_with_retry(
     original_request = nl_request
     last_error = None
     identifier_hint = extra_system_hint
+    auto_refresh_used = False
+
+    def _plan_once(request_text: str, schema_state: Dict[str, Any]) -> str:
+        sql = plan_sql(
+            request_text,
+            allow_writes,
+            force_refresh_schema=False,
+            param_hints=param_hints,
+            extra_system_hint=identifier_hint,
+            schema_state=schema_state,
+        )
+
+        raw_params: Dict[str, Any] = dict(param_hints or {})
+        normalized_sql = normalize_limit_literal(sql, raw_params)
+        hydrated_params = hydrate_readonly_params(normalized_sql, raw_params)
+
+        if validator is not None:
+            result_sql = validator(normalized_sql, hydrated_params, allow_writes)
+            if isinstance(result_sql, str):
+                normalized_sql = normalize_limit_literal(result_sql, raw_params)
+                hydrated_params = hydrate_readonly_params(normalized_sql, raw_params)
+        else:
+            normalized_sql = _validate_with_guard(normalized_sql, raw_params, allow_writes)
+
+        return normalized_sql
 
     for attempt in range(max_retries):
+        schema_state = get_schema_state(force_refresh_schema if attempt == 0 else False)
+
         current_request = original_request
         if last_error and attempt > 0:
             current_request = (
@@ -211,45 +336,66 @@ def plan_sql_with_retry(
             console.print(f"[yellow]Retry {attempt + 1}/{max_retries} after error: {last_error}[/]")
 
         try:
-            sql = plan_sql(
-                current_request,
-                allow_writes,
-                force_refresh_schema if attempt == 0 else False,
-                param_hints,
-                extra_system_hint=identifier_hint,
-            )
-
-            raw_params: Dict[str, Any] = dict(param_hints or {})
-            # Normalize LIMIT before hydrating params so missing :limit becomes literal 1
-            normalized_sql = normalize_limit_literal(sql, raw_params)
-            hydrated_params = hydrate_readonly_params(normalized_sql, raw_params)
-
-            if validator is not None:
-                result_sql = validator(normalized_sql, hydrated_params, allow_writes)
-                if isinstance(result_sql, str):
-                    normalized_sql = normalize_limit_literal(result_sql, raw_params)
-                    hydrated_params = hydrate_readonly_params(normalized_sql, raw_params)
-            else:
-                normalized_sql = _validate_with_guard(normalized_sql, raw_params, allow_writes)
-
-            return normalized_sql
-
+            return _plan_once(current_request, schema_state)
         except IdentifierValidationError as ide:
-            last_error = str(ide)
             if STRICT_IDENTIFIER_MODE and ide.details.get("strict_violation"):
                 raise
+
             hint = ide.hint
             limit_hint = "Use a literal LIMIT 1 when returning a single row."
             combined_hint = hint or ""
-            if limit_hint not in combined_hint:
+            if limit_hint not in (combined_hint or ""):
                 combined_hint = f"{combined_hint}\n{limit_hint}" if combined_hint else limit_hint
             if identifier_hint:
-                if combined_hint:
-                    if combined_hint not in identifier_hint:
-                        identifier_hint = f"{identifier_hint}\n{combined_hint}"
+                if combined_hint and combined_hint not in identifier_hint:
+                    identifier_hint = f"{identifier_hint}\n{combined_hint}" if identifier_hint else combined_hint
             else:
                 identifier_hint = combined_hint or limit_hint
-            continue
+
+            if not auto_refresh_used:
+                fingerprint_before = schema_state.get("schema_fingerprint")
+                unknown_relations = ide.details.get("unknown_relations") or []
+                unknown_columns = ide.details.get("unknown_columns") or {}
+                try:
+                    refreshed_state = refresh_schema_summary()
+                except Exception as refresh_exc:
+                    raise RuntimeError(
+                        f"Failed to refresh schema summary: {refresh_exc}"
+                    ) from refresh_exc
+
+                fingerprint_after = refreshed_state.get("schema_fingerprint")
+                logger.info(
+                    "Schema refresh triggered after identifier validation failure: before=%s after=%s unknown_relations=%s unknown_columns=%s",
+                    fingerprint_before,
+                    fingerprint_after,
+                    unknown_relations,
+                    unknown_columns,
+                )
+
+                auto_refresh_used = True
+                last_error = None
+
+                try:
+                    return _plan_once(original_request, refreshed_state)
+                except IdentifierValidationError as refreshed_error:
+                    refresh_hint = "Schema was refreshed; identifier remains unknown."
+                    hint_text = refreshed_error.hint or ""
+                    if refresh_hint not in hint_text:
+                        hint_text = f"{hint_text}\n{refresh_hint}" if hint_text else refresh_hint
+                    raise IdentifierValidationError(
+                        refreshed_error.details,
+                        str(refreshed_error),
+                        hint_text,
+                    ) from refreshed_error
+                except Exception as exc_after_refresh:
+                    last_error = str(exc_after_refresh)
+                    continue
+
+            refresh_hint = "Schema was refreshed; identifier remains unknown."
+            hint_text = ide.hint or ""
+            if refresh_hint not in hint_text:
+                hint_text = f"{hint_text}\n{refresh_hint}" if hint_text else refresh_hint
+            raise IdentifierValidationError(ide.details, str(ide), hint_text) from ide
         except Exception as exc:
             last_error = str(exc)
             if attempt == max_retries - 1:

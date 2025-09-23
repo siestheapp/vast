@@ -7,16 +7,37 @@ This software is proprietary and confidential. Unauthorized use is prohibited.
 """
 
 import json
+import os
+from typing import Optional
+
 import typer
 from rich import print
 from rich.table import Table
+from sqlalchemy import create_engine
 
 from src.vast import service
 from src.vast.actions import build_review_feature_migration
+from src.vast.config import settings
 from src.vast.db import get_engine
 from src.vast.identifier_guard import IdentifierValidationError, format_identifier_error, load_schema_cache
+from src.vast.perms import bootstrap_perms
 
 app = typer.Typer(help="Vast1 — AI DB operator (MVP)")
+perms_app = typer.Typer(name="perms", help="Manage Vast database permissions")
+app.add_typer(perms_app, name="perms")
+
+
+def _owner_engine(url: str):
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        connect_args={
+            "options": (
+                f"-c statement_timeout={settings.default_statement_timeout_ms}"
+                f" -c idle_in_transaction_session_timeout={settings.idle_in_tx_timeout_ms}"
+            )
+        },
+    )
 
 def _parse_params(params_json: str | None) -> dict:
     if not params_json:
@@ -28,6 +49,78 @@ def _parse_params(params_json: str | None) -> dict:
         return data
     except Exception as e:
         raise typer.BadParameter(f"Invalid --params JSON: {e}")
+
+
+def _resolve_roles(ro_role: Optional[str], rw_role: Optional[str]) -> tuple[str, str]:
+    ro = ro_role or getattr(settings, "read_role", None) or "vast_ro"
+    rw = rw_role or os.getenv("VAST_WRITE_ROLE") or "vast_rw"
+    return ro, rw
+
+
+@perms_app.command("bootstrap")
+@app.command("perms:bootstrap")
+def perms_bootstrap(
+    schema: str = typer.Option(..., "--schema", help="Target schema name (e.g. public)"),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
+    owner_url: Optional[str] = typer.Option(
+        None,
+        "--owner-url",
+        envvar="DATABASE_URL_OWNER",
+        help="Override DATABASE_URL_OWNER for owner connection",
+        show_envvar=True,
+    ),
+    ro_role: Optional[str] = typer.Option(
+        None,
+        "--ro-role",
+        envvar="VAST_READ_ROLE",
+        help="Read-only role to grant permissions to",
+        show_envvar=True,
+    ),
+    rw_role: Optional[str] = typer.Option(
+        None,
+        "--rw-role",
+        envvar="VAST_WRITE_ROLE",
+        help="Read/write role to grant permissions to",
+        show_envvar=True,
+    ),
+):
+    schema = schema.strip()
+    if not schema:
+        print("[red]Schema name is required.[/]")
+        raise typer.Exit(code=1)
+
+    resolved_owner_url = owner_url or os.getenv("DATABASE_URL_OWNER")
+    if not resolved_owner_url:
+        print("[red]Owner connection URL is required (set DATABASE_URL_OWNER or use --owner-url).[/]")
+        raise typer.Exit(code=1)
+
+    resolved_ro, resolved_rw = _resolve_roles(ro_role, rw_role)
+
+    if not yes:
+        confirmed = typer.confirm(
+            f"Grant privileges on schema '{schema}' to roles '{resolved_ro}' and '{resolved_rw}'?",
+            default=False,
+        )
+        if not confirmed:
+            print("[yellow]Aborted.[/]")
+            raise typer.Exit(code=0)
+
+    owner_engine = _owner_engine(resolved_owner_url)
+    try:
+        result = bootstrap_perms(owner_engine, schema, resolved_ro, resolved_rw)
+    except Exception as exc:
+        print(f"[red]Failed to bootstrap permissions:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        owner_engine.dispose()
+
+    print("[green]Permissions bootstrapped successfully.[/]")
+    print(
+        f"Schema: {result['schema']} | read_role: {result['read_role']} | write_role: {result['write_role']}"
+    )
+    for stmt in result["statements"]:
+        print(f" - {stmt}")
+
 
 @app.command()
 def env():

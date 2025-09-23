@@ -10,12 +10,17 @@ from contextlib import contextmanager
 
 from sqlalchemy import text
 
-from .agent import plan_sql, plan_sql_with_retry
+from .agent import (
+    plan_sql,
+    plan_sql_with_retry,
+    load_or_build_schema_summary,
+    refresh_schema_summary as _agent_refresh_schema_summary,
+    get_schema_state as _agent_get_schema_state,
+)
 from .config import settings
 from .db import get_engine
 from .introspect import list_tables, table_columns
 from .identifier_guard import extract_requested_identifiers
-from .agent import load_or_build_schema_summary
 from .sql_params import hydrate_readonly_params, normalize_limit_literal, stmt_kind
 from .actions import (
     pg_dump_database,
@@ -83,6 +88,22 @@ except NameError:
 for _name in ("ensure_valid_identifiers", "safe_execute", "preflight_statements", "apply_statements", "looks_like_sql"):
     if _name not in __all__:
         __all__.append(_name)
+
+for _name in ("schema_state", "refresh_schema_summary"):
+    if _name not in __all__:
+        __all__.append(_name)
+
+
+def schema_state(force_refresh: bool = False) -> Dict[str, Any]:
+    """Expose the cached schema summary and fingerprint for callers/tests."""
+
+    return _agent_get_schema_state(force_refresh=force_refresh)
+
+
+def refresh_schema_summary() -> Dict[str, Any]:
+    """Force a schema summary refresh and return the updated state."""
+
+    return _agent_refresh_schema_summary()
 
 
 def _assert_privileges():

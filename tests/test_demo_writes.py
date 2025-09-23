@@ -86,22 +86,12 @@ class DummyEngine:
 
 
 @pytest.fixture
-def schema_map():
-    return {
-        "public": {
-            "customer": {"customer_id"},
-            "film": {"film_id"},
-        }
-    }
-
-
-@pytest.fixture
 def demo_statements():
     return build_review_feature_migration()
 
 
 @pytest.fixture
-def patch_services(monkeypatch, schema_map):
+def patch_services(monkeypatch):
     rw_engine = DummyEngine()
     ro_engine = object()
 
@@ -109,36 +99,20 @@ def patch_services(monkeypatch, schema_map):
         return ro_engine if readonly else rw_engine
 
     monkeypatch.setattr(service, "get_engine", fake_get_engine)
-    monkeypatch.setattr(service, "load_schema_cache", lambda *_args, **_kwargs: (schema_map, "fp"))
-
-    ensured = []
-
-    def fake_ensure(sql, **kwargs):
-        ensured.append(sql)
-        return schema_map
-
-    monkeypatch.setattr(service, "ensure_valid_identifiers", fake_ensure)
 
     return {
         "rw_engine": rw_engine,
         "ro_engine": ro_engine,
-        "schema_map": schema_map,
-        "ensured": ensured,
     }
 
 
 def test_preflight_runs_ddl_and_rolls_back(monkeypatch, patch_services, demo_statements):
     ctx = patch_services
-    notes = service.preflight_statements(
-        demo_statements,
-        engine=ctx["ro_engine"],
-        schema_map=ctx["schema_map"],
-    )
+    notes = service.preflight_statements(demo_statements)
 
     assert ctx["rw_engine"].events == ["BEGIN", "ROLLBACK", "CLOSE"]
     assert any(note.startswith("OK DDL CREATE") for note in notes)
     assert any(note.startswith("OK EXPLAIN DML") for note in notes)
-    assert ctx["ensured"] == []
     executed = ctx["rw_engine"].statements
     assert any(stmt.startswith("CREATE TABLE") for stmt in executed)
     assert any(stmt.startswith("EXPLAIN") for stmt in executed)
@@ -146,21 +120,15 @@ def test_preflight_runs_ddl_and_rolls_back(monkeypatch, patch_services, demo_sta
 
 def test_apply_statements_commits(monkeypatch, patch_services, demo_statements):
     ctx = patch_services
-    service.apply_statements(
-        demo_statements,
-        engine=ctx["ro_engine"],
-        schema_map=ctx["schema_map"],
-    )
+    service.apply_statements(demo_statements)
 
-    assert ctx["rw_engine"].events.count("BEGIN") >= 1
-    assert ctx["rw_engine"].events[-1] == "COMMIT"
-    assert ctx["ensured"] == []
+    assert ctx["rw_engine"].events == ["BEGIN", "COMMIT", "CLOSE"]
     executed = [stmt.strip() for stmt in ctx["rw_engine"].statements]
     expected = [stmt.strip() for stmt in demo_statements]
     assert executed == expected
 
 
-def test_apply_statements_rolls_back_on_error(monkeypatch, schema_map, demo_statements):
+def test_apply_statements_rolls_back_on_error(monkeypatch, demo_statements):
     failing_engine = DummyEngine(fail_on=3)
     ro_engine = object()
 
@@ -168,14 +136,10 @@ def test_apply_statements_rolls_back_on_error(monkeypatch, schema_map, demo_stat
         return ro_engine if readonly else failing_engine
 
     monkeypatch.setattr(service, "get_engine", fake_get_engine)
-    monkeypatch.setattr(service, "load_schema_cache", lambda *_args, **_kwargs: (schema_map, "fp"))
-    monkeypatch.setattr(service, "ensure_valid_identifiers", lambda *args, **kwargs: schema_map)
-
     with pytest.raises(RuntimeError):
-        service.apply_statements(demo_statements, engine=ro_engine, schema_map=schema_map)
+        service.apply_statements(demo_statements)
 
-    assert "BEGIN" in failing_engine.events
-    assert "ROLLBACK" in failing_engine.events
+    assert failing_engine.events == ["BEGIN", "ROLLBACK", "CLOSE"]
     assert len(failing_engine.statements) == 3
 
 

@@ -209,6 +209,20 @@ def test_apply_statements_rolls_back_on_error(monkeypatch, demo_statements):
 
 @pytest.mark.skipif(not settings.database_url_rw, reason="DATABASE_URL not configured")
 def test_demo_writes_integration():
+    import os
+    from src.vast import db
+
+    original_rw = str(settings.database_url_rw)
+    desired_rw = original_rw.replace("vast_ro", "vast_rw") if original_rw else original_rw
+
+    original_database_url = str(settings.database_url_ro)
+    os.environ["DATABASE_URL"] = original_database_url
+
+    if desired_rw and desired_rw != original_rw:
+        os.environ["DATABASE_URL_RW"] = desired_rw
+        settings.database_url_rw = desired_rw
+        db._engine_rw = None
+
     engine = get_engine(readonly=False)
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS public.review CASCADE"))
@@ -224,3 +238,8 @@ def test_demo_writes_integration():
 
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS public.review CASCADE"))
+
+    if desired_rw and desired_rw != original_rw:
+        settings.database_url_rw = original_rw
+        os.environ["DATABASE_URL_RW"] = original_rw
+        db._engine_rw = None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, Iterable, List, Set, Tuple
 from contextlib import contextmanager
 
 from sqlalchemy import text
@@ -69,6 +69,65 @@ def looks_like_sql(text: str | None) -> bool:
     return first_token in SQL_PREFIXES
 
 
+def connection_info(engine) -> Dict[str, Any]:
+    """Return connection metadata for the provided engine."""
+
+    query = text(
+        """
+        SELECT
+          current_database() AS db,
+          current_user       AS whoami,
+          inet_server_addr()::text AS host,
+          inet_server_port()       AS port
+        """
+    )
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(query).mappings().first()
+    except Exception as exc:
+        return {
+            "db": None,
+            "whoami": None,
+            "host": None,
+            "port": None,
+            "error": str(exc),
+        }
+
+    if not row:
+        return {"db": None, "whoami": None, "host": None, "port": None}
+
+    return {
+        "db": row.get("db"),
+        "whoami": row.get("whoami"),
+        "host": row.get("host"),
+        "port": row.get("port"),
+    }
+
+
+def probe_read(engine) -> None:
+    """Lightweight read probe to ensure SELECT works."""
+
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+
+
+def check_reference_privileges(engine, tables: Iterable[str]) -> List[Dict[str, Any]]:
+    """Verify REFERENCES privileges for the active role on each table."""
+
+    results: List[Dict[str, Any]] = []
+    with engine.connect() as conn:
+        for tbl in tables:
+            res = conn.execute(
+                text(
+                    "SELECT has_table_privilege(current_user, :tbl, 'REFERENCES') AS has_ref"
+                ),
+                {"tbl": tbl},
+            ).scalar()
+            results.append({"table": tbl, "has_ref": bool(res)})
+    return results
+
+
 # Exported name that tests patch: src.vast.service.safe_execute
 def safe_execute(sql, params=None, allow_writes=False, force_write=False):
     """
@@ -90,6 +149,10 @@ for _name in ("ensure_valid_identifiers", "safe_execute", "preflight_statements"
         __all__.append(_name)
 
 for _name in ("schema_state", "refresh_schema_summary"):
+    if _name not in __all__:
+        __all__.append(_name)
+
+for _name in ("connection_info", "probe_read", "check_reference_privileges"):
     if _name not in __all__:
         __all__.append(_name)
 

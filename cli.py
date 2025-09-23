@@ -8,7 +8,7 @@ This software is proprietary and confidential. Unauthorized use is prohibited.
 
 import json
 import os
-from typing import Optional
+from typing import Iterable, Optional
 
 import typer
 from rich import print
@@ -56,6 +56,52 @@ def _resolve_roles(ro_role: Optional[str], rw_role: Optional[str]) -> tuple[str,
     rw = rw_role or os.getenv("VAST_WRITE_ROLE") or "vast_rw"
     return ro, rw
 
+
+ASK_ENV_HELP = """
+Set required environment variables, for example:
+  export DATABASE_URL=postgresql://vast_ro:password@localhost/pagila
+  export DATABASE_URL_RW=postgresql://vast_rw:password@localhost/pagila
+""".strip()
+
+DEMO_ENV_HELP = """
+Set required environment variables, for example:
+  export DATABASE_URL=postgresql://vast_ro:password@localhost/pagila
+  export DATABASE_URL_RW=postgresql://vast_rw:password@localhost/pagila
+  export DATABASE_URL_OWNER=postgresql://postgres:password@localhost/pagila
+""".strip()
+
+DEMO_REFERENCE_TABLES: Iterable[str] = ("public.customer", "public.film")
+
+
+def _diagnostics_enabled(no_diagnostics: bool) -> bool:
+    env_setting = os.getenv("VAST_DIAG")
+    if env_setting == "1":
+        return True
+    if env_setting == "0":
+        return False
+    return not no_diagnostics
+
+
+def _require_env(var_names: Iterable[str], help_block: str) -> None:
+    missing = [var for var in var_names if not os.getenv(var)]
+    if missing:
+        print(
+            f"[red]Missing required environment variables:[/] {', '.join(missing)}"
+        )
+        print(help_block)
+        raise typer.Exit(code=1)
+
+
+def _print_connection_banner(info: dict[str, object], mode: str) -> None:
+    if info.get("error"):
+        print(f"[red]Failed to fetch connection info:[/] {info['error']}")
+        raise typer.Exit(code=1)
+
+    db = info.get("db") or "unknown"
+    user = info.get("whoami") or "unknown"
+    host = info.get("host") or "local"
+    port = info.get("port") or "?"
+    print(f"Using db={db} user={user} host={host} port={port} (mode={mode})")
 
 @perms_app.command("bootstrap")
 @app.command("perms:bootstrap")
@@ -167,7 +213,30 @@ def ask(
     refresh_schema: bool = typer.Option(False, "--refresh-schema", help="Rebuild schema cache"),
     no_retry: bool = typer.Option(False, "--no-retry", help="Disable automatic retry on SQL errors"),
     max_retries: int = typer.Option(2, "--max-retries", help="Maximum retry attempts (default: 2)"),
+    no_diagnostics: bool = typer.Option(
+        False,
+        "--no-diagnostics",
+        help="Suppress connection diagnostics",
+    ),
 ):
+    _require_env(["DATABASE_URL"], ASK_ENV_HELP)
+
+    diagnostics_on = _diagnostics_enabled(no_diagnostics)
+    ro_engine = get_engine(readonly=True)
+
+    conn_info = service.connection_info(ro_engine)
+    if conn_info.get("error"):
+        _print_connection_banner(conn_info, "ro")
+
+    try:
+        service.probe_read(ro_engine)
+    except Exception as exc:
+        print(f"[red]Read probe failed:[/] {exc}")
+        raise typer.Exit(code=1)
+
+    if diagnostics_on:
+        _print_connection_banner(conn_info, "ro")
+
     p = _parse_params(params)
     try:
         outcome = service.plan_and_execute(
@@ -189,7 +258,41 @@ def ask(
 
 
 @app.command("demo:writes")
-def demo_writes() -> None:
+def demo_writes(
+    no_diagnostics: bool = typer.Option(
+        False,
+        "--no-diagnostics",
+        help="Suppress connection diagnostics",
+    )
+) -> None:
+    _require_env(["DATABASE_URL", "DATABASE_URL_RW"], DEMO_ENV_HELP)
+
+    diagnostics_on = _diagnostics_enabled(no_diagnostics)
+    rw_engine = get_engine(readonly=False)
+    conn_info = service.connection_info(rw_engine)
+    if conn_info.get("error"):
+        _print_connection_banner(conn_info, "rw")
+
+    try:
+        service.probe_read(rw_engine)
+    except Exception as exc:
+        print(f"[red]Write-role connection probe failed:[/] {exc}")
+        raise typer.Exit(code=1)
+
+    if diagnostics_on:
+        _print_connection_banner(conn_info, "rw")
+
+    privilege_report = service.check_reference_privileges(rw_engine, DEMO_REFERENCE_TABLES)
+    missing_refs = [entry for entry in privilege_report if not entry.get("has_ref")]
+    if missing_refs:
+        whoami = conn_info.get("whoami") or "current role"
+        for entry in missing_refs:
+            print(
+                f"[red]Insufficient privileges for {whoami} on {entry['table']} (REFERENCES=false).[/]"
+                " Run: python cli.py perms:bootstrap --schema public --yes"
+            )
+        raise typer.Exit(code=1)
+
     statements = build_review_feature_migration()
     if not statements:
         print("[red]No demo statements found.[/]")

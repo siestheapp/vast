@@ -9,11 +9,11 @@ from sqlalchemy import text
 
 from .agent import plan_sql, plan_sql_with_retry
 from .config import settings
-from .db import safe_execute as _db_safe_execute, get_engine
+from .db import get_engine
 from .introspect import list_tables, table_columns
 from .identifier_guard import (
-    ensure_valid_identifiers,  # re-export for tests that patch service.ensure_valid_identifiers
     extract_requested_identifiers,
+    ensure_valid_identifiers as _ensure_valid_identifiers,
 )
 from .agent import load_or_build_schema_summary
 from .sql_params import hydrate_readonly_params, normalize_limit_literal
@@ -304,7 +304,28 @@ def repo_write(path: str, content: str, overwrite: bool = False) -> Dict[str, An
     except RepoAccessError as exc:
         raise RuntimeError(str(exc)) from exc
     return {"path": written, "status": "written"}
-def safe_execute(sql: str, params=None, allow_writes: bool = False, force_write: bool = False):
-    """Wrapper that forwards to the core DB safe_execute (patch point for tests)."""
 
-    return _db_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)
+
+# --- Test patch points ---------------------------------------------------
+
+
+# Re-export identifier validation for monkeypatching via "src.vast.service.ensure_valid_identifiers"
+def ensure_valid_identifiers(*args, **kwargs):
+    return _ensure_valid_identifiers(*args, **kwargs)
+
+
+# Re-export safe_execute so tests can patch "src.vast.service.safe_execute"
+def safe_execute(sql, params=None, allow_writes=False, force_write=False):
+    try:
+        from .conversation import safe_execute as _conv_safe_execute
+        return _conv_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)
+    except Exception:
+        from .db import safe_execute as _db_safe_execute
+        return _db_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)
+
+
+try:
+    __all__ = list(set(__all__ + ["ensure_valid_identifiers", "safe_execute"]))
+except NameError:
+    __all__ = ["ensure_valid_identifiers", "safe_execute"]
+

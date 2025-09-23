@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re, shlex, subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import TypedDict, List
 from .config import settings
 
@@ -72,7 +72,7 @@ def pg_dump_database(outfile: str | None = None, container_name: str = "vast-pg"
     if not url:
         return {"ok": False, "command": "", "stdout": "", "stderr": "DATABASE_URL missing", "artifacts": []}
 
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     # Choose default extension based on format
     fmt_norm = (fmt or "custom").lower()
     ext = ".sql" if fmt_norm == "plain" else ".dump"

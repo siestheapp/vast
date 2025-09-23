@@ -115,6 +115,9 @@ def execute_sql(
     """Run SQL with guardrails and return structured output."""
     normalized_sql = normalize_limit_literal(sql, params)
     hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    if normalized_sql.strip().upper().endswith("LIMIT 1") and "limit" not in (hydrated_params or {}):
+        hydrated_params = dict(hydrated_params or {})
+        hydrated_params["limit"] = 1
     summary = load_or_build_schema_summary()
     engine = get_engine(readonly=True)
     requested = extract_requested_identifiers(normalized_sql)
@@ -180,6 +183,9 @@ def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -
     """Validate generated SQL without forcing writes to run."""
     normalized_sql = normalize_limit_literal(sql, params)
     hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    if normalized_sql.strip().upper().endswith("LIMIT 1") and "limit" not in (hydrated_params or {}):
+        hydrated_params = dict(hydrated_params or {})
+        hydrated_params["limit"] = 1
     summary = load_or_build_schema_summary()
     engine = get_engine(readonly=True)
     requested = extract_requested_identifiers(normalized_sql)

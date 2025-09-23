@@ -19,6 +19,8 @@ def test_cli_run_hydrates_limit(monkeypatch):
         captured["params"] = params
         return []
 
+    # Ensure CLI uses the same service module object we're patching
+    monkeypatch.setattr(cli, "service", service, raising=False)
     monkeypatch.setattr(service, "ensure_valid_identifiers", fake_ensure, raising=False)
     monkeypatch.setattr(service, "load_or_build_schema_summary", fake_load_summary, raising=False)
     monkeypatch.setattr(service, "safe_execute", fake_safe_execute, raising=False)

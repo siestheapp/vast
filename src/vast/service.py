@@ -11,10 +11,7 @@ from .agent import plan_sql, plan_sql_with_retry
 from .config import settings
 from .db import get_engine
 from .introspect import list_tables, table_columns
-from .identifier_guard import (
-    extract_requested_identifiers,
-    ensure_valid_identifiers as _ensure_valid_identifiers,
-)
+from .identifier_guard import extract_requested_identifiers
 from .agent import load_or_build_schema_summary
 from .sql_params import hydrate_readonly_params, normalize_limit_literal
 from .actions import (
@@ -27,6 +24,34 @@ from .actions import (
 )
 from .knowledge import get_knowledge_store
 from .repo import list_files as repo_list_files, read_file as repo_read_file, write_file as repo_write_file, RepoAccessError
+
+# Ensure test patch points exist at import time for pytest dotted-path monkeypatch.
+# Bind into module globals immediately.
+from .identifier_guard import ensure_valid_identifiers as _ensure_valid_identifiers
+
+# Exported name that tests patch: src.vast.service.ensure_valid_identifiers
+ensure_valid_identifiers = _ensure_valid_identifiers  # bind now
+
+
+# Exported name that tests patch: src.vast.service.safe_execute
+def safe_execute(sql, params=None, allow_writes=False, force_write=False):
+    """
+    Proxy to conversation.safe_execute so tests can patch via
+    'src.vast.service.safe_execute' without importing conversation first.
+    Local import avoids potential import cycles.
+    """
+    from .conversation import safe_execute as _conv_safe_execute
+    return _conv_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)
+
+
+# Keep __all__ explicit
+try:
+    __all__
+except NameError:
+    __all__ = []
+for _name in ("ensure_valid_identifiers", "safe_execute"):
+    if _name not in __all__:
+        __all__.append(_name)
 
 
 def _assert_privileges():
@@ -305,30 +330,13 @@ def repo_write(path: str, content: str, overwrite: bool = False) -> Dict[str, An
         raise RuntimeError(str(exc)) from exc
     return {"path": written, "status": "written"}
 
-
-# ==== BEGIN: test patch points re-export (keep top-level) ====
-
-# 1) Re-export the identifier validator so tests can patch:
-from .identifier_guard import ensure_valid_identifiers as ensure_valid_identifiers  # noqa: F401
-
-# 2) Expose a safe_execute proxy so tests can patch service.safe_execute:
-def safe_execute(sql, params=None, allow_writes=False, force_write=False):
-    """
-    Proxy to conversation.safe_execute so tests can monkeypatch via
-    'src.vast.service.safe_execute' without importing conversation first.
-    Local import avoids circular imports at module import time.
-    """
-    from .conversation import safe_execute as _conv_safe_execute  # local import to avoid cycles
-    return _conv_safe_execute(sql, params=params, allow_writes=allow_writes, force_write=force_write)
-
-# Make sure these names are exported explicitly (helps static tools, too):
-try:
-    __all__
-except NameError:
-    __all__ = []
-for _name in ("ensure_valid_identifiers", "safe_execute"):
-    if _name not in __all__:
-        __all__.append(_name)
-
-# ==== END: test patch points re-export ====
+# Provide a late-binding escape hatch for tests importing during startup.
+def __getattr__(name: str):
+    if name == "ensure_valid_identifiers":
+        from .identifier_guard import ensure_valid_identifiers as _f
+        return _f
+    if name == "safe_execute":
+        from .conversation import safe_execute as _f
+        return _f
+    raise AttributeError(name)
 

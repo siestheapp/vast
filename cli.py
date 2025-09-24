@@ -14,10 +14,11 @@ import typer
 from rich import print
 from rich.table import Table
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.vast import service
 from src.vast.actions import build_review_feature_migration
-from src.vast.config import settings
+from src.vast.config import get_ro_url, get_rw_url, settings
 from src.vast.db import get_engine
 from src.vast.identifier_guard import IdentifierValidationError, format_identifier_error, load_schema_cache
 from src.vast.perms import bootstrap_perms
@@ -59,15 +60,19 @@ def _resolve_roles(ro_role: Optional[str], rw_role: Optional[str]) -> tuple[str,
 
 ASK_ENV_HELP = """
 Set required environment variables, for example:
-  export DATABASE_URL=postgresql://vast_ro:password@localhost/pagila
+  export DATABASE_URL_RO=postgresql://vast_ro:password@localhost/pagila
   export DATABASE_URL_RW=postgresql://vast_rw:password@localhost/pagila
+  # legacy fallback
+  export DATABASE_URL=postgresql://vast_ro:password@localhost/pagila
 """.strip()
 
 DEMO_ENV_HELP = """
 Set required environment variables, for example:
-  export DATABASE_URL=postgresql://vast_ro:password@localhost/pagila
+  export DATABASE_URL_RO=postgresql://vast_ro:password@localhost/pagila
   export DATABASE_URL_RW=postgresql://vast_rw:password@localhost/pagila
   export DATABASE_URL_OWNER=postgresql://postgres:password@localhost/pagila
+  # legacy fallback
+  export DATABASE_URL=postgresql://vast_ro:password@localhost/pagila
 """.strip()
 
 DEMO_REFERENCE_TABLES: Iterable[str] = ("public.customer", "public.film")
@@ -80,16 +85,6 @@ def _diagnostics_enabled(no_diagnostics: bool) -> bool:
     if env_setting == "0":
         return False
     return not no_diagnostics
-
-
-def _require_env(var_names: Iterable[str], help_block: str) -> None:
-    missing = [var for var in var_names if not os.getenv(var)]
-    if missing:
-        print(
-            f"[red]Missing required environment variables:[/] {', '.join(missing)}"
-        )
-        print(help_block)
-        raise typer.Exit(code=1)
 
 
 def _print_connection_banner(info: dict[str, object], mode: str) -> None:
@@ -188,6 +183,97 @@ def columns(schema: str, table: str):
         tbl.add_row(c["column_name"], c["data_type"], c["is_nullable"], str(c["column_default"]))
     print(tbl)
 
+
+@app.command("health")
+def health(
+    no_refresh: bool = typer.Option(
+        False,
+        "--no-refresh",
+        help="Skip schema summary refresh",
+    ),
+):
+    ok = True
+
+    ro_env = os.getenv("DATABASE_URL_RO") or os.getenv("DATABASE_URL")
+    rw_env = os.getenv("DATABASE_URL_RW")
+    key_env = os.getenv("OPENAI_API_KEY") or getattr(settings, "OPENAI_API_KEY", None)
+
+    typer.echo("== Env ==")
+    typer.echo(f"RO configured: {'yes' if ro_env else 'no'}")
+    typer.echo(f"RW configured: {'yes' if rw_env else 'no (falls back to RO)'}")
+    typer.echo(f"OPENAI key   : {'yes' if key_env else 'no'}")
+    typer.echo(f"Include schemas: {settings.VAST_SCHEMA_INCLUDE or 'public'}")
+
+    if ro_env:
+        try:
+            get_ro_url()
+        except Exception as exc:
+            ok = False
+            typer.echo(f"RO configuration error: {exc}")
+
+    if rw_env:
+        try:
+            get_rw_url()
+        except Exception as exc:
+            ok = False
+            typer.echo(f"RW configuration error: {exc}")
+
+    try:
+        ro_engine = get_engine(readonly=True)
+        info = service.connection_info(ro_engine)
+        if info.get("error"):
+            ok = False
+            typer.echo(f"DB connect error: {info['error']}")
+        else:
+            typer.echo("== DB (RO) ==")
+            typer.echo(
+                f"db={info['db']} user={info['whoami']} host={info['host']} port={info['port']}"
+            )
+    except SQLAlchemyError as exc:
+        ok = False
+        typer.echo(f"DB connect failed: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive
+        ok = False
+        typer.echo(f"DB connect failed: {exc}")
+
+    if ok and not no_refresh:
+        try:
+            from src.vast.agent import load_or_build_schema_summary
+
+            typer.echo("Refreshing schema summary…")
+            load_or_build_schema_summary(force_refresh=True)
+            typer.echo("Schema summary refreshed.")
+        except Exception as exc:
+            ok = False
+            typer.echo(f"Schema refresh failed: {exc}")
+
+    if ok:
+        try:
+            q = "select current_user, current_database(), inet_server_addr()::text limit 1"
+            result = service.plan_and_execute(
+                q,
+                allow_writes=False,
+                refresh_schema=False,
+            )
+            execution = result.get("execution", {})
+            rows = execution.get("rows") or []
+            if rows:
+                row = rows[0]
+                typer.echo("== Smoke read ==")
+                typer.echo(str(row))
+            else:
+                typer.echo("Smoke read returned no rows")
+        except Exception as exc:
+            ok = False
+            typer.echo(f"Smoke read failed: {exc}")
+
+    raise typer.Exit(code=0 if ok else 1)
+
+
+@app.command("diagnostics")
+def diagnostics():
+    return health()
+
 @app.command()
 def run(
     sql: str,
@@ -219,7 +305,14 @@ def ask(
         help="Suppress connection diagnostics",
     ),
 ):
-    _require_env(["DATABASE_URL"], ASK_ENV_HELP)
+    if not (os.getenv("DATABASE_URL_RO") or os.getenv("DATABASE_URL")):
+        typer.echo(
+            "Missing required env: set DATABASE_URL_RO (or legacy DATABASE_URL).\n"
+            "For example:\n"
+            "  export DATABASE_URL_RO=postgresql://vast_ro:password@localhost/pagila\n",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     diagnostics_on = _diagnostics_enabled(no_diagnostics)
     ro_engine = get_engine(readonly=True)
@@ -265,7 +358,23 @@ def demo_writes(
         help="Suppress connection diagnostics",
     )
 ) -> None:
-    _require_env(["DATABASE_URL", "DATABASE_URL_RW"], DEMO_ENV_HELP)
+    if not (os.getenv("DATABASE_URL_RO") or os.getenv("DATABASE_URL")):
+        typer.echo(
+            "Missing required env: set DATABASE_URL_RO (or legacy DATABASE_URL).\n"
+            "For example:\n"
+            "  export DATABASE_URL_RO=postgresql://vast_ro:password@localhost/pagila\n",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if not os.getenv("DATABASE_URL_RW"):
+        typer.echo(
+            "Missing required env: set DATABASE_URL_RW for write operations.\n"
+            "For example:\n"
+            "  export DATABASE_URL_RW=postgresql://vast_rw:password@localhost/pagila\n",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     diagnostics_on = _diagnostics_enabled(no_diagnostics)
     rw_engine = get_engine(readonly=False)

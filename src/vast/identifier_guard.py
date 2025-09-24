@@ -11,7 +11,16 @@ from sqlalchemy import text
 
 from .db import get_engine
 from .introspect import list_tables, table_columns, schema_fingerprint
-from .sql_params import hydrate_readonly_params
+from .sql_params import hydrate_readonly_params, stmt_kind
+
+
+SYSTEM_SCHEMAS: Set[str] = {"pg_catalog", "information_schema", "pg_toast"}
+
+
+def _is_system_relation(rel: str) -> bool:
+    rel = (rel or "").replace('"', "")
+    schema = rel.split('.', 1)[0] if '.' in rel else 'public'
+    return schema.lower() in SYSTEM_SCHEMAS
 
 
 class IdentifierValidationError(ValueError):
@@ -586,12 +595,43 @@ def validate_identifiers(
     error_text = identifiers.get("error_text", "")
     alias_map = identifiers.get("aliases", {}) or {}
     cte_columns_map = identifiers.get("cte_columns", {}) or {}
+
+    stripped_sql = (sql or "").lstrip()
+    first_token = stripped_sql.split(None, 1)[0].upper() if stripped_sql else ""
+    sql_kind = stmt_kind(sql or "")
+    is_select_like = sql_kind == "SELECT" or first_token == "EXPLAIN"
+
+    def _resolves_to_system(name: str | None) -> bool:
+        if not name:
+            return False
+        if _is_system_relation(name):
+            return True
+        mapped_name = alias_map.get(name)
+        if isinstance(mapped_name, str) and "." in mapped_name:
+            return _is_system_relation(mapped_name)
+        return False
+
     if requested is None:
         requested = extract_requested_identifiers(sql)
-    requested_relations = set(requested.get("relations", set()))
-    requested_columns = {
+    requested_relations_all = set(requested.get("relations", set()))
+    if is_select_like:
+        requested_relations = {
+            rel for rel in requested_relations_all if not _resolves_to_system(rel)
+        }
+    else:
+        requested_relations = requested_relations_all
+
+    requested_columns_all = {
         key: set(value) for key, value in (requested.get("columns", {}) or {}).items()
     }
+    if is_select_like:
+        requested_columns = {
+            key: cols
+            for key, cols in requested_columns_all.items()
+            if not _resolves_to_system(key)
+        }
+    else:
+        requested_columns = requested_columns_all
     unknown_relations: Set[str] = set()
     unknown_columns: Dict[str, Set[str]] = {}
 
@@ -601,6 +641,8 @@ def validate_identifiers(
             base_relations.add(mapped)
 
     for relation in base_relations:
+        if is_select_like and _is_system_relation(relation):
+            continue
         schema, table = relation.split(".", 1)
         table_map = schema_cache.get(schema, {})
         if table not in table_map:
@@ -608,6 +650,8 @@ def validate_identifiers(
 
     for relation_key, cols in columns_map.items():
         if not cols:
+            continue
+        if is_select_like and _resolves_to_system(relation_key):
             continue
         mapped = alias_map.get(relation_key)
         if mapped and mapped in cte_columns_map:
@@ -632,6 +676,8 @@ def validate_identifiers(
             target_relation = relation_key
 
         if target_relation and "." in target_relation:
+            if is_select_like and _is_system_relation(target_relation):
+                continue
             schema, table = target_relation.split(".", 1)
             table_map = schema_cache.get(schema, {})
             allowed = table_map.get(table, set())
@@ -652,12 +698,13 @@ def validate_identifiers(
         select_cols = _split_select_list(sql)
         if select_cols and len(base_relations) == 1:
             relation = next(iter(base_relations))
-            schema, table = relation.split(".", 1)
-            table_map = schema_cache.get(schema, {})
-            allowed = table_map.get(table, set())
-            missing = {col for col in select_cols if col not in (allowed or set())}
-            if missing:
-                unknown_columns[relation] = missing
+            if not (is_select_like and _is_system_relation(relation)):
+                schema, table = relation.split(".", 1)
+                table_map = schema_cache.get(schema, {})
+                allowed = table_map.get(table, set())
+                missing = {col for col in select_cols if col not in (allowed or set())}
+                if missing:
+                    unknown_columns[relation] = missing
         elif select_cols and len(cte_columns_map) == 1:
             cte_name = next(iter(cte_columns_map.keys()))
             allowed = cte_columns_map.get(cte_name, set())

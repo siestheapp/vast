@@ -40,3 +40,21 @@ def test_strict_unknown_table_no_execute(monkeypatch):
     details = exc.value.details
     assert details["strict_violation"] is True
     assert details["unknown_relations"] == ["public.films"]
+
+
+def test_strict_allows_system_schema_reads(monkeypatch):
+    calls: list[str] = []
+
+    def fake_safe_execute(sql, params=None, allow_writes=False, force_write=False):
+        calls.append(sql)
+        return []
+
+    monkeypatch.setattr("src.vast.service.safe_execute", fake_safe_execute)
+
+    service.execute_sql("SELECT table_name FROM information_schema.tables LIMIT 1")
+    service.execute_sql("SELECT relname FROM pg_catalog.pg_class LIMIT 1")
+
+    with pytest.raises(IdentifierValidationError):
+        service.execute_sql("SELECT * FROM public.nonexistent_system_guard LIMIT 1")
+
+    assert len(calls) == 2

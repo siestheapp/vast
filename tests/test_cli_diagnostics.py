@@ -11,31 +11,34 @@ from src.vast import service
 runner = CliRunner()
 
 
-def test_missing_env_ask_fails_helpfully(monkeypatch):
+def test_missing_env_ask_requires_ro_source(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("DATABASE_URL_RO", "postgresql://vast_ro:pass@localhost/db")
-    monkeypatch.setenv("DATABASE_URL_RW", "postgresql://vast_rw:pass@localhost/db")
+    monkeypatch.delenv("DATABASE_URL_RO", raising=False)
 
     result = runner.invoke(cli.app, ["ask", "SELECT 1"], catch_exceptions=False)
 
     assert result.exit_code == 1
-    assert "DATABASE_URL" in result.stdout
-    assert "export DATABASE_URL=" in result.stdout
+    output = result.stdout + result.stderr
+    assert "DATABASE_URL_RO" in output
+    assert "export DATABASE_URL_RO=" in output
 
 
 def test_missing_env_demo_fails_helpfully(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://vast_ro:pass@localhost/db")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL_RO", "postgresql://vast_ro:pass@localhost/db")
     monkeypatch.delenv("DATABASE_URL_RW", raising=False)
 
     result = runner.invoke(cli.app, ["demo:writes"], catch_exceptions=False)
 
     assert result.exit_code == 1
-    assert "DATABASE_URL_RW" in result.stdout
-    assert "export DATABASE_URL_RW=" in result.stdout
+    output = result.stdout + result.stderr
+    assert "DATABASE_URL_RW" in output
+    assert "export DATABASE_URL_RW=" in output
 
 
 def test_connection_info_prints(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://vast_ro:pass@localhost/db")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL_RO", "postgresql://vast_ro:pass@localhost/db")
     monkeypatch.setenv("DATABASE_URL_RW", "postgresql://vast_rw:pass@localhost/db")
     monkeypatch.setenv("VAST_DIAG", "1")
 
@@ -68,7 +71,8 @@ def test_connection_info_prints(monkeypatch):
 
 
 def test_privileges_block_demo(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://vast_ro:pass@localhost/db")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL_RO", "postgresql://vast_ro:pass@localhost/db")
     monkeypatch.setenv("DATABASE_URL_RW", "postgresql://vast_rw:pass@localhost/db")
 
     monkeypatch.setattr(cli, "get_engine", lambda readonly=True: object())
@@ -94,5 +98,6 @@ def test_privileges_block_demo(monkeypatch):
     result = runner.invoke(cli.app, ["demo:writes"], catch_exceptions=False)
 
     assert result.exit_code == 1
-    assert "Insufficient privileges for vast_rw on public.customer (REFERENCES=false)." in result.stdout
-    assert "python cli.py perms:bootstrap --schema public --yes" in result.stdout
+    output = result.stdout + result.stderr
+    assert "Insufficient privileges for vast_rw on public.customer (REFERENCES=false)." in output
+    assert "python cli.py perms:bootstrap --schema public --yes" in output

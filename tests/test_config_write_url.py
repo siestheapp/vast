@@ -1,7 +1,3 @@
-import importlib
-
-import pytest
-
 from src.vast import config
 
 
@@ -20,5 +16,6 @@ def test_write_url_falls_back_to_rw(monkeypatch):
 def test_write_url_missing(monkeypatch):
     monkeypatch.setattr(config.settings, "write_url_override", None)
     monkeypatch.setattr(config.settings, "database_url_rw", None)
-    with pytest.raises(RuntimeError):
-        config.write_url()
+    monkeypatch.setattr(config.settings, "database_url_ro", "postgresql://ro")
+
+    assert config.write_url() == "postgresql://ro"

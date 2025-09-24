@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.vast.conversation import VastConversation
 from src.vast.introspect import list_tables
+from src.vast.service import environment_status
+from api.routers.health import health_full
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -25,10 +27,21 @@ def show_welcome():
     """Show welcome message with database info"""
     tables = list_tables()
     
+    env = environment_status().get("vast_env", "dev")
+    try:
+        health = health_full()
+        project = health.get("db", {}).get("project_name")
+        if not project:
+            project = health.get("db", {}).get("project_ref")
+        if not project:
+            project = health.get("db", {}).get("database", "Unknown DB")
+    except Exception:
+        project = os.getenv("VAST_PROJECT_NAME", "Unknown DB")
+
     # Create a nice welcome panel
     welcome = Panel.fit(
         "[bold cyan]VAST - AI Database Architect[/]\n\n"
-        f"Connected to: [yellow]Pagila Movie Database[/]\n"
+        f"Connected to: [yellow]{project}[/] ({env})\n"
         f"Tables: [green]{len(tables)}[/] tables available\n\n"
         "I can:\n"
         "  • Answer questions about your data\n"

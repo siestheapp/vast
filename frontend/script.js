@@ -195,16 +195,19 @@ async function fetchHealthFull() {
     const payload = await response.json();
     const ok = !!(payload && payload.db_ok);
     const db = (payload && payload.db) || {};
-    
+
     const pill = document.getElementById('healthStatus');
     const banner = document.getElementById('dbBanner');
     if (!pill || !banner) console.warn('Missing #healthStatus or #dbBanner');
 
+    const friendly = db.project_name || db.project_ref || db.database || 'Unknown';
     pill.classList.toggle('status-ok', ok);
     pill.classList.toggle('status-bad', !ok);
-    banner.textContent = ok
-      ? `Connected to: ${db.database} on ${db.host} (user=${db.user}) · schema: ${db.schema||'public'}`
-      : 'Connected to: Unknown (health failed)';
+    pill.textContent = ok ? 'CONNECTED · DEV' : 'DISCONNECTED';
+    pill.title = ok ? `${db.user || ''}@${db.host || ''}/${db.database || ''}` : (payload && payload.error ? String(payload.error) : '');
+
+    banner.textContent = ok ? `Connected to: ${friendly}` : 'Connected to: Unknown (health failed)';
+    banner.title = ok ? `${db.user || 'unknown'}@${db.host || 'unknown'}/${db.database || 'unknown'}` : (payload && payload.error ? String(payload.error) : '');
   } catch (error) {
     const pill = document.getElementById('healthStatus');
     const banner = document.getElementById('dbBanner');
@@ -212,7 +215,10 @@ async function fetchHealthFull() {
 
     pill.classList.toggle('status-ok', false);
     pill.classList.toggle('status-bad', true);
+    pill.textContent = 'DISCONNECTED';
+    pill.title = error && error.message ? error.message : '';
     banner.textContent = 'Connected to: Unknown (health failed)';
+    banner.title = error && error.message ? error.message : '';
     console.error(error);
   }
 }

@@ -13,11 +13,179 @@ done
 PROJECT_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 cd "$PROJECT_DIR"
 
+ENV_HASH=""
+DB_USER=""
+DB_HOST=""
+DB_PORT=""
+REMOTE_DB="false"
+
+load_env() {
+  if [ -f .env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
+    if command -v sha256sum >/dev/null 2>&1; then
+      ENV_HASH=$(sha256sum .env | cut -d' ' -f1)
+    else
+      ENV_HASH=$(shasum -a 256 .env | cut -d' ' -f1)
+    fi
+  else
+    # Hash the relevant vars even without an .env to detect direct exports.
+    ENV_HASH=$(python3 - <<'PY'
+import hashlib, os
+payload = "\n".join([
+    os.environ.get("DATABASE_URL_RO", ""),
+    os.environ.get("VAST_SCHEMA_INCLUDE", ""),
+])
+print(hashlib.sha256(payload.encode()).hexdigest())
+PY
+)
+  fi
+}
+
+parse_db_url() {
+  DB_USER=""
+  DB_HOST=""
+  DB_PORT=""
+  if [ -z "${DATABASE_URL_RO:-}" ]; then
+    return
+  fi
+  local parsed
+  parsed=$(python3 - <<'PY'
+import os
+from urllib import parse
+
+url = os.environ.get("DATABASE_URL_RO")
+if not url:
+    print("\n\n")
+else:
+    parts = parse.urlsplit(url)
+    print((parts.username or ""))
+    print((parts.hostname or ""))
+    print((parts.port or ""))
+PY
+)
+  IFS=$'\n' read -r DB_USER DB_HOST DB_PORT <<<"$parsed"
+}
+
+# Lightweight parser used for gating Docker actions without depending on Python state.
+parse_db() {
+  local u="${DATABASE_URL_RO:-}"
+  if [ -z "$u" ]; then
+    DB_HOST=""
+    DB_PORT=""
+    return
+  fi
+  DB_HOST=$(sed -E 's#.*@([^:/?]+).*#\1#' <<<"$u")
+  DB_PORT=$(sed -nE 's#.*@[^:/?]+:([0-9]+).*#\1#p' <<<"$u")
+  DB_PORT=${DB_PORT:-5432}
+}
+
+is_remote_db() {
+  if [ -z "${DATABASE_URL_RO:-}" ]; then
+    return 1
+  fi
+  local host="${DB_HOST:-}"
+  local port="${DB_PORT:-}"
+  if [ -z "$host" ]; then
+    return 1
+  fi
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  if [ "$host" = "localhost" ] || [ "$host" = "127.0.0.1" ] || [ "$host" = "::1" ]; then
+    return 1
+  fi
+  if [ -z "$port" ]; then
+    port="5432"
+  fi
+  if [ "$port" = "5433" ]; then
+    return 1
+  fi
+  return 0
+}
+
+refresh_schema_cache() {
+  local cache_dir=".vast"
+  mkdir -p "$cache_dir"
+  local hash_file="$cache_dir/.env_hash"
+  local prev=""
+  if [ -f "$hash_file" ]; then
+    prev=$(cat "$hash_file")
+  fi
+  local current="${ENV_HASH:-}"
+  if [ "$current" != "$prev" ]; then
+    if [ -d "$cache_dir" ]; then
+      echo "[start] Detected DATABASE_URL_RO/VAST_SCHEMA_INCLUDE change; clearing schema cache (.vast)."
+      rm -rf "$cache_dir"
+      mkdir -p "$cache_dir"
+    fi
+    echo "$current" > "$hash_file"
+  fi
+}
+
+print_target_banner() {
+  if [ -z "${DATABASE_URL_RO:-}" ]; then
+    echo "[start] Connected target: (not configured)"
+    return
+  fi
+  local banner
+  banner=$(echo "$DATABASE_URL_RO" | sed -E 's,postgresql://([^:@]+)(:[^@]*)?@([^/:]+)(:([0-9]+))?.*,user=\1 host=\3 port=\5,')
+  if [[ "$banner" == *"port=" ]]; then
+    local port="${DB_PORT:-}"
+    if [ -z "$port" ]; then
+      port="5432"
+    fi
+    banner="${banner}${port}"
+  fi
+  echo "[start] Connected target: $banner"
+}
+
+dns_check() {
+  if ! is_remote_db; then
+    return
+  fi
+  if [ -z "${DATABASE_URL_RO:-}" ]; then
+    return
+  fi
+  if ! python3 - <<'PY'
+import os
+import socket
+from urllib import parse
+
+url = os.environ.get("DATABASE_URL_RO")
+if not url:
+    raise SystemExit(0)
+host = parse.urlsplit(url).hostname
+if not host:
+    raise SystemExit(0)
+try:
+    socket.getaddrinfo(host, None)
+except socket.gaierror as exc:
+    print(f"[start] ERROR: Unable to resolve DATABASE_URL_RO host '{host}': {exc}")
+    raise SystemExit(1)
+PY
+  then
+    echo "[start] HINT: Verify Supabase DNS/network configuration and retry."
+    exit 1
+  fi
+}
+
 echo "[start] Project: $PROJECT_DIR"
+
+load_env
+parse_db_url
 
 if [ ! -f .env ]; then
   echo "[start] WARNING: .env not found. Create one or copy from .env.example"
 fi
+
+if is_remote_db; then
+  REMOTE_DB="true"
+fi
+
+print_target_banner
+refresh_schema_cache
+dns_check
 
 ensure_docker() {
   if docker info >/dev/null 2>&1; then
@@ -114,15 +282,30 @@ PY
 print_receipt() {
   echo ""
   echo "[start] ✅ Environment ready"
-  echo "- Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')"
-  echo "- Container: vast-pg (port 5433 -> 5432)"
+  if [ "$REMOTE_DB" = "true" ]; then
+    local port="${DB_PORT:-}"
+    if [ -z "$port" ]; then
+      port="5432"
+    fi
+    echo "- Database: remote ${DB_HOST:-unknown}:${port}"
+    echo "- Docker: skipped (remote target)"
+  else
+    echo "- Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')"
+    echo "- Container: vast-pg (port 5433 -> 5432)"
+  fi
   echo "- Python: $(python -V 2>&1)"
   echo "- VAST entry: start_vast.py"
   echo ""
 }
 
-ensure_docker
-ensure_container
+parse_db
+if [[ -n "${DATABASE_URL_RO:-}" && "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" && "$DB_HOST" != "::1" && "$DB_PORT" != "5433" ]]; then
+  REMOTE_DB="true"
+  echo "[start] Remote DB detected; skipping Pagila container."
+else
+  ensure_docker
+  ensure_container
+fi
 ensure_venv
 print_receipt
 
@@ -198,5 +381,3 @@ start_electron
 # Run CLI in the foreground. When it exits, cleanup trap will run.
 echo "[start] Launching CLI..."
 python start_vast.py
-
-

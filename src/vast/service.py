@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Set, Tuple
 from contextlib import contextmanager
@@ -57,6 +58,46 @@ SQL_PREFIXES = (
     "REVOKE",
     "EXPLAIN",
 )
+
+
+_LIMIT_HINT_RE = re.compile(r"\b(?:top|first|limit|last|show(?:\s+me)?)\s+(\d+)\b", re.IGNORECASE)
+_LIMIT_BIND_RE = re.compile(r"(?i)\blimit\s+:limit\b")
+
+
+def _default_limit() -> int:
+    value = getattr(settings, "VAST_DEFAULT_LIMIT", 10)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return 10
+
+
+def infer_limit_from_text(text: str | None, default: int | None = None) -> int:
+    """Infer an integer limit from natural language text."""
+
+    fallback = default if default is not None else _default_limit()
+    if not text:
+        return fallback
+    match = _LIMIT_HINT_RE.search(text)
+    if not match:
+        return fallback
+    try:
+        value = int(match.group(1))
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return fallback
+    return value if value > 0 else fallback
+
+
+def _apply_limit_hint(sql_text: str | None, prompt_text: str | None, params: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Apply limit inference when SQL uses a :limit bind and the caller omitted it."""
+
+    data = dict(params or {})
+    if "limit" in data:
+        return data
+    if not sql_text or not _LIMIT_BIND_RE.search(sql_text):
+        return data
+    data["limit"] = infer_limit_from_text(prompt_text, _default_limit())
+    return data
 
 
 def looks_like_sql(text: str | None) -> bool:
@@ -144,7 +185,7 @@ try:
     __all__
 except NameError:
     __all__ = []
-for _name in ("ensure_valid_identifiers", "safe_execute", "preflight_statements", "apply_statements", "looks_like_sql"):
+for _name in ("ensure_valid_identifiers", "safe_execute", "preflight_statements", "apply_statements", "looks_like_sql", "infer_limit_from_text"):
     if _name not in __all__:
         __all__.append(_name)
 
@@ -228,11 +269,12 @@ def execute_sql(
     force_write: bool = False,
 ) -> Dict[str, Any]:
     """Run SQL with guardrails and return structured output."""
-    normalized_sql = normalize_limit_literal(sql, params)
-    hydrated_params = hydrate_readonly_params(normalized_sql, params)
-    if normalized_sql.strip().upper().endswith("LIMIT 1") and "limit" not in (hydrated_params or {}):
+    params_with_hint = _apply_limit_hint(sql, sql, params)
+    normalized_sql = normalize_limit_literal(sql, params_with_hint)
+    hydrated_params = hydrate_readonly_params(normalized_sql, params_with_hint)
+    if _LIMIT_BIND_RE.search(sql or "") and "limit" not in (hydrated_params or {}):
         hydrated_params = dict(hydrated_params or {})
-        hydrated_params["limit"] = 1
+        hydrated_params["limit"] = infer_limit_from_text(sql, _default_limit())
     summary = load_or_build_schema_summary()
     engine = get_engine(readonly=True)
     requested = extract_requested_identifiers(normalized_sql)
@@ -268,9 +310,11 @@ def plan_and_execute(
 ) -> Dict[str, Any]:
     """Plan SQL using the agent and execute it, returning SQL and results."""
 
-    param_hints = params or {}
+    param_hints = dict(params or {})
+    is_sql = looks_like_sql(nl_request)
 
-    if looks_like_sql(nl_request):
+    if is_sql:
+        param_hints = _apply_limit_hint(nl_request, nl_request, param_hints)
         summary = load_or_build_schema_summary()
         engine = get_engine(readonly=True)
         ensure_valid_identifiers(
@@ -308,6 +352,7 @@ def plan_and_execute(
             param_hints=param_hints,
         )
 
+    param_hints = _apply_limit_hint(sql, nl_request, param_hints)
     execution = execute_sql(sql, params=param_hints, allow_writes=allow_writes, force_write=force_write)
     return {
         "sql": sql,
@@ -317,11 +362,12 @@ def plan_and_execute(
 
 def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -> None:
     """Validate generated SQL without forcing writes to run."""
+    params = _apply_limit_hint(sql, sql, params)
     normalized_sql = normalize_limit_literal(sql, params)
     hydrated_params = hydrate_readonly_params(normalized_sql, params)
-    if normalized_sql.strip().upper().endswith("LIMIT 1") and "limit" not in (hydrated_params or {}):
+    if _LIMIT_BIND_RE.search(sql or "") and "limit" not in (hydrated_params or {}):
         hydrated_params = dict(hydrated_params or {})
-        hydrated_params["limit"] = 1
+        hydrated_params["limit"] = infer_limit_from_text(sql, _default_limit())
     summary = load_or_build_schema_summary()
     engine = get_engine(readonly=True)
     requested = extract_requested_identifiers(normalized_sql)

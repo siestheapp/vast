@@ -187,6 +187,39 @@ $('#checkHealth').addEventListener('click', async () => {
   }
 });
 
+async function fetchHealthFull() {
+  const baseInput = document.getElementById('apiBase');
+  const base = baseInput ? baseInput.value : 'http://localhost:8000';
+  try {
+    const response = await fetch(`${base.replace(/\/$/, '')}/health/full`, { cache: 'no-store' });
+    const payload = await response.json();
+    const ok = !!(payload && payload.db_ok);
+    const db = (payload && payload.db) || {};
+    
+    const pill = document.getElementById('healthStatus');
+    const banner = document.getElementById('dbBanner');
+    if (!pill || !banner) console.warn('Missing #healthStatus or #dbBanner');
+
+    pill.classList.toggle('status-ok', ok);
+    pill.classList.toggle('status-bad', !ok);
+    banner.textContent = ok
+      ? `Connected to: ${db.database} on ${db.host} (user=${db.user}) · schema: ${db.schema||'public'}`
+      : 'Connected to: Unknown (health failed)';
+  } catch (error) {
+    const pill = document.getElementById('healthStatus');
+    const banner = document.getElementById('dbBanner');
+    if (!pill || !banner) console.warn('Missing #healthStatus or #dbBanner');
+
+    pill.classList.toggle('status-ok', false);
+    pill.classList.toggle('status-bad', true);
+    banner.textContent = 'Connected to: Unknown (health failed)';
+    console.error(error);
+  }
+}
+
+document.getElementById('checkHealth').addEventListener('click', fetchHealthFull);
+window.addEventListener('DOMContentLoaded', fetchHealthFull);
+
 $('#askSubmit').addEventListener('click', async () => {
   const output = $('#askResult');
   output.textContent = 'Thinking…';

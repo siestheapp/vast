@@ -31,5 +31,5 @@ def test_cli_run_hydrates_limit(monkeypatch):
     ])
 
     assert result.exit_code == 0
-    assert captured["sql"].strip().upper().endswith("LIMIT 1")
-    assert captured["params"] == {"limit": 1}
+    assert captured["sql"].strip().upper().endswith("LIMIT 10")
+    assert captured["params"] == {"limit": 10}

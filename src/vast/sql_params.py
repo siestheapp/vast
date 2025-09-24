@@ -5,9 +5,14 @@ from __future__ import annotations
 import re
 from typing import Dict
 
+from .config import settings
+
+
+DEFAULT_LIMIT = getattr(settings, "VAST_DEFAULT_LIMIT", 10) or 10
+
 
 DEFAULTS_RO: Dict[str, int] = {
-    "limit": 1,
+    "limit": DEFAULT_LIMIT,
     "offset": 0,
 }
 
@@ -54,7 +59,7 @@ def hydrate_readonly_params(sql: str, params: Dict[str, object] | None) -> Dict[
 
 
 def normalize_limit_literal(sql: str, params: Dict[str, object] | None) -> str:
-    """Replace `LIMIT :limit` with `LIMIT 1` when no limit parameter is provided."""
+    """Replace `LIMIT :limit` with a literal default when the parameter is missing."""
 
     if not is_select_only(sql):
         return sql
@@ -65,7 +70,7 @@ def normalize_limit_literal(sql: str, params: Dict[str, object] | None) -> str:
     if not _LIMIT_BIND_RE.search(sql or ""):
         return sql
 
-    return _LIMIT_BIND_RE.sub("LIMIT 1", sql)
+    return _LIMIT_BIND_RE.sub(f"LIMIT {DEFAULT_LIMIT}", sql)
 
 
 def stmt_kind(sql: str) -> str:

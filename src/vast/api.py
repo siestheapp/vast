@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from . import service
 from .identifier_guard import IdentifierValidationError, format_identifier_error
 from .conversation import VastConversation
+from api.routers import health as health_router
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -117,6 +118,7 @@ class RepoWriteRequest(BaseModel):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Vast1 API", version="0.1.0")
+    app.include_router(health_router.router)
     conversations: Dict[str, VastConversation] = {}
 
     @app.get("/health")

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     DATABASE_URL_RW: str | None = None
     VAST_DIAGNOSTICS: int | bool = 0
     VAST_SCHEMA_INCLUDE: str = "public"
+    VAST_DEFAULT_LIMIT: int = 10
 
     # Legacy fields kept for backward compatibility
     default_statement_timeout_ms: int = 8_000

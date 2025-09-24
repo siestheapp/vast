@@ -39,9 +39,9 @@ def pytest_sessionstart(session):
         def _shim_execute_sql(sql: str, params=None, allow_writes: bool = False, force_write: bool = False):
             normalized = normalize_limit_literal(sql, params)
             hydrated = hydrate_readonly_params(normalized, params)
-            if normalized.strip().upper().endswith("LIMIT 1") and "limit" not in (hydrated or {}):
+            if normalized.strip().upper().endswith("LIMIT 10") and "limit" not in (hydrated or {}):
                 hydrated = dict(hydrated or {})
-                hydrated["limit"] = 1
+                hydrated["limit"] = 10
             return svc.safe_execute(
                 normalized,
                 params=hydrated or {},

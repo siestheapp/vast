@@ -990,20 +990,77 @@ Remember: You are VAST, with direct database access. Current context:
         response = self._enforce_grounding(user_input, response)
         assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)
         self.messages.append(assistant_msg)
-        
+
         # Save session
         self._save_session()
-        
+
+        # --- NEW: If auto_execute is on but nothing ran, plan+run a RO SELECT and answer.
+        # We trigger when the reply contains the placeholder OR the input is a DB-fact question.
+        if auto_execute:
+            no_sql_blocks = not self._extract_code_blocks(response, lang_hint="sql")
+            wants_real_answer = (
+                "will generate and execute the appropriate select" in (response or "").lower()
+                or self._is_db_fact_question(user_input)
+            )
+            if no_sql_blocks and wants_real_answer:
+                try:
+                    exec_out = service.plan_and_execute(
+                        nl_request=user_input,
+                        params=None,
+                        allow_writes=False,    # hard-stop writes
+                        force_write=False,
+                        refresh_schema=False,
+                        retry=True,
+                        max_retries=2,
+                    )
+                    execution = exec_out.get("execution", exec_out)
+                    rows = execution.get("rows", []) or []
+                    row_count = execution.get("row_count", len(rows))
+
+                    # Render compact answer
+                    if row_count == 0:
+                        final = "No rows."
+                    elif row_count == 1 and isinstance(rows[0], dict) and len(rows[0]) == 1:
+                        # Single cell → say it plainly
+                        k, v = next(iter(rows[0].items()))
+                        final = f"**{k}**: {v}"
+                    else:
+                        # Small markdown table
+                        cols = list(rows[0].keys()) if rows and isinstance(rows[0], dict) else []
+                        if cols:
+                            lines = [
+                                "| " + " | ".join(cols) + " |",
+                                "| " + " | ".join(["---"] * len(cols)) + " |",
+                            ]
+                            for r in rows[:10]:
+                                lines.append("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
+                            suffix = "" if row_count <= 10 else f"\n_{row_count-10} more row(s) not shown_"
+                            final = "\n".join(lines) + suffix
+                        else:
+                            final = f"Returned {row_count} row(s)."
+
+                    # Replace placeholder with actual answer
+                    assistant_msg = Message(role=MessageRole.ASSISTANT, content=final)
+                    self.messages.append(assistant_msg)
+                    self._save_session()
+                    return final
+                except Exception as exc:
+                    err = f"Query planning/execution failed: {exc}"
+                    assistant_msg = Message(role=MessageRole.ASSISTANT, content=err)
+                    self.messages.append(assistant_msg)
+                    self._save_session()
+                    return err
+
         return response
     
-    def _extract_code_blocks(self, text: str) -> Dict[str, List[str]]:
+    def _extract_code_blocks(self, text: str, lang_hint: str | None = None) -> Dict[str, List[str]] | List[str]:
         """Extract SQL and system command blocks from the response"""
         blocks = {"sql": [], "bash": [], "system": []}
         lines = text.split('\n')
         in_block = False
         block_type = None
         current_block = []
-        
+
         for line in lines:
             if line.strip().startswith('```sql'):
                 in_block = True
@@ -1025,7 +1082,9 @@ Remember: You are VAST, with direct database access. Current context:
                 block_type = None
             elif in_block:
                 current_block.append(line)
-        
+
+        if lang_hint:
+            return blocks.get(lang_hint.lower(), [])
         return blocks
     
     def _extract_sql_blocks(self, text: str) -> List[str]:

@@ -18,7 +18,7 @@ from .identifier_guard import (
     IdentifierValidationError,
     extract_requested_identifiers,
 )
-from .sql_params import hydrate_readonly_params, normalize_limit_literal
+from .sql_params import hydrate_readonly_params, normalize_limit_literal, stmt_kind
 from .settings import STRICT_IDENTIFIER_MODE
 
 console = Console()
@@ -217,7 +217,10 @@ def plan_sql(
 
     system_prompt = BASE_RULES
     if not allow_writes:
-        system_prompt += "\n- For this task, generate ONLY SELECT queries."
+        system_prompt += (
+            "\n- READ-ONLY MODE: Generate ONLY SELECT statements."
+            " Never return INSERT, UPDATE, DELETE, MERGE, CALL, DO, or DDL."
+        )
     if extra_system_hint:
         system_prompt += "\n" + extra_system_hint.strip()
 
@@ -277,6 +280,15 @@ def plan_sql(
     sql = _single_statement(_strip_fences(content))
     if not sql:
         raise RuntimeError("Empty SQL after normalization. Aborting.")
+
+    if not allow_writes:
+        kind = stmt_kind(sql)
+        if kind != "SELECT":
+            keyword = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
+            raise RuntimeError(
+                "Read-only mode requires a SELECT statement. "
+                f"Received {keyword or 'non-SELECT SQL'}."
+            )
 
     console.print(f"[green]Generated SQL:[/]\n{sql}")
     return sql

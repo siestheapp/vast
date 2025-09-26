@@ -272,6 +272,12 @@ def execute_sql(
     params_with_hint = _apply_limit_hint(sql, sql, params)
     normalized_sql = normalize_limit_literal(sql, params_with_hint)
     hydrated_params = hydrate_readonly_params(normalized_sql, params_with_hint)
+    sql_kind = stmt_kind(normalized_sql)
+    if not allow_writes and sql_kind != "SELECT":
+        keyword = normalized_sql.lstrip().split(None, 1)[0].upper() if (normalized_sql or "").strip() else ""
+        raise ValueError(
+            f"Read-only mode: expected a SELECT statement but received {keyword or 'non-SELECT SQL'}."
+        )
     if _LIMIT_BIND_RE.search(sql or "") and "limit" not in (hydrated_params or {}):
         hydrated_params = dict(hydrated_params or {})
         hydrated_params["limit"] = infer_limit_from_text(sql, _default_limit())
@@ -365,6 +371,12 @@ def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -
     params = _apply_limit_hint(sql, sql, params)
     normalized_sql = normalize_limit_literal(sql, params)
     hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    sql_kind = stmt_kind(normalized_sql)
+    if not allow_writes and sql_kind != "SELECT":
+        keyword = normalized_sql.lstrip().split(None, 1)[0].upper() if (normalized_sql or "").strip() else ""
+        raise ValueError(
+            f"Read-only mode: expected a SELECT statement but received {keyword or 'non-SELECT SQL'}."
+        )
     if _LIMIT_BIND_RE.search(sql or "") and "limit" not in (hydrated_params or {}):
         hydrated_params = dict(hydrated_params or {})
         hydrated_params["limit"] = infer_limit_from_text(sql, _default_limit())

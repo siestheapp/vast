@@ -152,7 +152,7 @@ const sendChat = async () => {
   try {
     const data = await request('/conversations/process', {
       method: 'POST',
-      body: JSON.stringify({ message: msg, auto_execute: true }),
+      body: JSON.stringify({ message: msg, auto_execute: true, allow_writes: false }),
     });
     hideTypingIndicator();
     renderAssistant(data.response || '');
@@ -233,7 +233,7 @@ $('#askSubmit').addEventListener('click', async () => {
     const message = $('#askInput').value;
     const data = await request('/conversations/process', {
       method: 'POST',
-      body: JSON.stringify({ message, auto_execute: true }),
+      body: JSON.stringify({ message, auto_execute: true, allow_writes: false }),
     });
     output.textContent = data.response || '';
     if (lastResponse) {

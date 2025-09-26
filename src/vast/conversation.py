@@ -997,7 +997,18 @@ Remember: You are VAST, with direct database access. Current context:
         # --- NEW: If auto_execute is on but nothing ran, plan+run a RO SELECT and answer.
         # We trigger when the reply contains the placeholder OR the input is a DB-fact question.
         if auto_execute:
-            no_sql_blocks = not self._extract_code_blocks(response, lang_hint="sql")
+            sql_blocks = self._extract_code_blocks(response, lang_hint="sql") or []
+
+            def _has_executable_sql(block: str) -> bool:
+                for line in (block or "").splitlines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if not stripped.startswith("--"):
+                        return True
+                return False
+
+            no_sql_blocks = not any(_has_executable_sql(b) for b in sql_blocks)
             wants_real_answer = (
                 "will generate and execute the appropriate select" in (response or "").lower()
                 or self._is_db_fact_question(user_input)

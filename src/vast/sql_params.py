@@ -88,6 +88,8 @@ def stmt_kind(sql: str) -> str:
         return "DDL"
     if token in {"INSERT", "UPDATE", "DELETE", "MERGE"}:
         return "DML"
+    if token in {"CALL", "DO"}:
+        return "PROC"
     if token in {"SELECT", "WITH"}:
         return "SELECT"
     return "OTHER"

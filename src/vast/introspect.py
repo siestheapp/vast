@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from hashlib import sha1
-from typing import List
+from typing import Iterable, List, Sequence, Tuple
 
 from sqlalchemy import String, bindparam, inspect, text
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -111,27 +111,44 @@ def table_columns(schema: str, table: str) -> list[dict]:
     return out
 
 
-def schema_fingerprint() -> str:
-    """Deterministic fingerprint of (schema, table, column, type)."""
+def fingerprint_from_columns(
+    entries: Iterable[Tuple[str, str, Sequence[Tuple[str | None, str | None]]]],
+) -> str:
+    """Build a deterministic fingerprint from column specs."""
 
-    tables = list_tables()
-    h = sha1()
-    for entry in tables:
-        schema = entry["table_schema"]
-        table = entry["table_name"]
-        cols = table_columns(schema, table)
-        if not cols:
-            h.update(f"{schema}|{table}|<no-columns>".encode("utf-8"))
+    digest = sha1()
+    for schema, table, columns in entries:
+        column_list = list(columns)
+        if not column_list:
+            digest.update(f"{schema}|{table}|<no-columns>".encode("utf-8"))
             continue
-        for col in cols:
-            h.update(
+        for name, col_type in column_list:
+            digest.update(
                 "|".join(
                     [
                         schema,
                         table,
-                        str(col.get("column_name")),
-                        str(col.get("data_type")),
+                        str(name or ""),
+                        str(col_type or ""),
                     ]
                 ).encode("utf-8")
             )
-    return h.hexdigest()
+    return digest.hexdigest()
+
+
+def schema_fingerprint() -> str:
+    """Deterministic fingerprint of (schema, table, column, type)."""
+
+    tables = list_tables()
+    specs: List[Tuple[str, str, Sequence[Tuple[str | None, str | None]]]] = []
+    for entry in tables:
+        schema = entry["table_schema"]
+        table = entry["table_name"]
+        cols = table_columns(schema, table)
+        column_specs = [
+            (str(col.get("column_name")) if col.get("column_name") is not None else None, str(col.get("data_type")))
+            for col in cols
+        ]
+        specs.append((schema, table, column_specs))
+
+    return fingerprint_from_columns(specs)

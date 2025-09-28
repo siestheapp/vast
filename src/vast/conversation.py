@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import os
 import concurrent.futures
+import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
@@ -47,6 +48,7 @@ except Exception:
     from db import get_engine   # if db.py is at repo root
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 # Conversation storage path
 CONVERSATION_DIR = Path(".vast/conversations")
@@ -1008,12 +1010,46 @@ Remember: You are VAST, with direct database access. Current context:
                         return True
                 return False
 
-            no_sql_blocks = not any(_has_executable_sql(b) for b in sql_blocks)
+            def _first_keyword(block: str) -> str:
+                for line in (block or "").splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("--"):
+                        continue
+                    return stripped.split(None, 1)[0].upper()
+                return ""
+
+            executable_blocks = [b for b in sql_blocks if _has_executable_sql(b)]
+            no_sql_blocks = not executable_blocks
+            select_block_present = any(_first_keyword(b) in {"SELECT", "WITH"} for b in executable_blocks)
+            grounded_this_turn = self._grounding_evidence_present_this_turn()
+            question_text = (user_input or "").lower()
+            is_db_fact = self._is_db_fact_question(user_input)
+            list_like_question = bool(re.search(r"\b(list|show|which|get|what)\b", question_text))
+            placeholder_in_response = "will generate and execute the appropriate select" in (response or "").lower()
+
             wants_real_answer = (
-                "will generate and execute the appropriate select" in (response or "").lower()
-                or self._is_db_fact_question(user_input)
+                placeholder_in_response
+                or is_db_fact
+                or list_like_question
+                or (select_block_present and not grounded_this_turn)
             )
-            if no_sql_blocks and wants_real_answer:
+
+            logger.debug(
+                "auto_execute=%s, no_sql_blocks=%s, is_db_fact=%s, list_like=%s, select_block=%s, grounded=%s, response_preview=%r",
+                auto_execute,
+                no_sql_blocks,
+                is_db_fact,
+                list_like_question,
+                select_block_present,
+                grounded_this_turn,
+                (response or "")[:100],
+            )
+
+            should_trigger = wants_real_answer and (
+                no_sql_blocks or (select_block_present and not grounded_this_turn)
+            )
+
+            if should_trigger:
                 try:
                     exec_out = service.plan_and_execute(
                         nl_request=user_input,

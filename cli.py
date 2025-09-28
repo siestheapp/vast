@@ -19,6 +19,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.vast import service
 from src.vast.actions import build_review_feature_migration
 from src.vast.config import get_ro_url, get_rw_url, settings
+from src.vast.catalog_pg import (
+    load_schema_cards as load_schema_cards_pg,
+    schema_fingerprint as catalog_schema_fingerprint,
+)
 from src.vast.db import get_engine
 from src.vast.identifier_guard import IdentifierValidationError, format_identifier_error, load_schema_cache
 from src.vast.perms import bootstrap_perms
@@ -26,6 +30,8 @@ from src.vast.perms import bootstrap_perms
 app = typer.Typer(help="Vast1 — AI DB operator (MVP)")
 perms_app = typer.Typer(name="perms", help="Manage Vast database permissions")
 app.add_typer(perms_app, name="perms")
+catalog_app = typer.Typer(name="catalog", help="Manage schema catalog cache")
+app.add_typer(catalog_app, name="catalog")
 
 
 def _owner_engine(url: str):
@@ -182,6 +188,53 @@ def columns(schema: str, table: str):
     for c in service.columns(schema, table):
         tbl.add_row(c["column_name"], c["data_type"], c["is_nullable"], str(c["column_default"]))
     print(tbl)
+
+
+@catalog_app.command("build")
+def catalog_build():
+    cards = load_schema_cards_pg(refresh=True)
+    fingerprint = catalog_schema_fingerprint(cards)
+    table_count = len(cards)
+    column_count = sum(len(card.get("columns") or []) for card in cards.values())
+    print(f"Built {table_count} tables, {column_count} columns, fingerprint {fingerprint}")
+
+
+@catalog_app.command("show")
+def catalog_show(
+    table: Optional[str] = typer.Argument(None, help="Table name to display (schema.table)"),
+):
+    cards = load_schema_cards_pg(refresh=False)
+    if not cards:
+        print("[yellow]No schema cards available. Run `catalog build` first.[/]")
+        raise typer.Exit(code=0)
+
+    if table:
+        target = table.strip()
+        if not target:
+            print("[red]Empty table name provided.[/]")
+            raise typer.Exit(code=1)
+        if "." not in target:
+            target = f"public.{target}"
+        target_lower = target.lower()
+        matched = None
+        for key, card in cards.items():
+            if key.lower() == target_lower:
+                matched = card
+                break
+        if matched is None:
+            print(f"[red]Table '{target}' not found in schema catalog.[/]")
+            raise typer.Exit(code=1)
+        print(json.dumps(matched, indent=2))
+        raise typer.Exit(code=0)
+
+    fingerprint = catalog_schema_fingerprint(cards)
+    print(f"Schema catalog contains {len(cards)} tables (fingerprint {fingerprint}).")
+    for key in sorted(cards, key=lambda k: (cards[k]["schema"], cards[k]["table"])):
+        card = cards[key]
+        aliases = ", ".join(card.get("aliases") or [])
+        alias_hint = f" aliases: {aliases}" if aliases else ""
+        column_count = len(card.get("columns") or [])
+        print(f"- {key} ({column_count} columns){alias_hint}")
 
 
 @app.command("health")

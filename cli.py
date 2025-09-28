@@ -357,6 +357,7 @@ def ask(
         "--no-diagnostics",
         help="Suppress connection diagnostics",
     ),
+    debug: bool = typer.Option(False, "--debug", help="Print timing details for resolver/LLM/db"),
 ):
     if not (os.getenv("DATABASE_URL_RO") or os.getenv("DATABASE_URL")):
         typer.echo(
@@ -393,14 +394,25 @@ def ask(
             refresh_schema=refresh_schema,
             retry=not no_retry,
             max_retries=max_retries,
+            debug=debug,
         )
     except IdentifierValidationError as err:
         print(f"[red]{format_identifier_error(err.details)}[/]")
         raise typer.Exit(code=1)
 
-    label = "SQL" if service.looks_like_sql(q) else "Generated SQL"
-    print(f"[bold]{label}:[/]\n{outcome['sql']}")
-    print(outcome["execution"])
+    if outcome.get("answer") is not None:
+        print(f"[bold]Answer:[/] {outcome['answer']}")
+
+    sql_text = outcome.get("sql")
+    if sql_text:
+        label = "SQL" if service.looks_like_sql(q) else "Generated SQL"
+        print(f"[bold]{label}:[/]\n{sql_text}")
+    execution_payload = outcome.get("execution")
+    if execution_payload is not None:
+        print(execution_payload)
+
+    if debug and outcome.get("meta"):
+        print(f"[bold]Timing meta:[/] {outcome['meta']}")
 
 
 @app.command("demo:writes")

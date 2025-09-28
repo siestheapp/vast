@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Set, Tuple
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from .agent import (
     load_or_build_schema_summary,
     refresh_schema_summary as _agent_refresh_schema_summary,
     get_schema_state as _agent_get_schema_state,
+    resolver_shortcut,
 )
 from .config import settings
 from .db import get_engine
@@ -108,6 +110,21 @@ def looks_like_sql(text: str | None) -> bool:
         return False
     first_token = stripped.split(None, 1)[0].upper()
     return first_token in SQL_PREFIXES
+
+
+def _print_debug_timings(meta: Dict[str, Any]) -> None:
+    resolver_ms = meta.get("resolver_ms", 0)
+    llm_ms = meta.get("llm_ms", 0)
+    db_ms = meta.get("db_ms", 0)
+    total_ms = meta.get("total_ms", 0)
+    print(
+        "debug timing → resolver_ms={resolver_ms} llm_ms={llm_ms} db_ms={db_ms} total_ms={total_ms}".format(
+            resolver_ms=resolver_ms,
+            llm_ms=llm_ms,
+            db_ms=db_ms,
+            total_ms=total_ms,
+        )
+    )
 
 
 def connection_info(engine) -> Dict[str, Any]:
@@ -313,11 +330,15 @@ def plan_and_execute(
     refresh_schema: bool = False,
     retry: bool = True,
     max_retries: int = 2,
+    debug: bool = False,
 ) -> Dict[str, Any]:
     """Plan SQL using the agent and execute it, returning SQL and results."""
 
+    total_start = time.perf_counter()
     param_hints = dict(params or {})
     is_sql = looks_like_sql(nl_request)
+    resolution: Dict[str, Any] | None = None
+    resolver_ms = 0
 
     if is_sql:
         param_hints = _apply_limit_hint(nl_request, nl_request, param_hints)
@@ -329,18 +350,79 @@ def plan_and_execute(
             schema_summary=summary,
             params=param_hints,
         )
+        db_start = time.perf_counter()
         execution = execute_sql(
             nl_request,
             params=param_hints,
             allow_writes=allow_writes,
             force_write=force_write,
         )
+        db_ms = int((time.perf_counter() - db_start) * 1000)
+        total_ms = int((time.perf_counter() - total_start) * 1000)
+        meta = {"resolver_ms": 0, "llm_ms": 0, "db_ms": db_ms, "total_ms": total_ms}
+        if debug:
+            _print_debug_timings(meta)
+        if isinstance(execution, dict):
+            execution = dict(execution)
+            execution["meta"] = meta
         return {
             "sql": nl_request,
             "execution": execution,
             "passthrough": True,
+            "meta": meta,
         }
 
+    try:
+        resolution, shortcut = resolver_shortcut(nl_request)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Resolver shortcut failed: %s", exc)
+        resolution, shortcut = None, None
+
+    if resolution:
+        resolver_ms = int(resolution.get("meta", {}).get("resolver_ms", 0))
+
+    if shortcut:
+        if "sql" not in shortcut:
+            meta = dict(shortcut.get("meta") or {})
+            meta.setdefault("resolver_ms", resolver_ms)
+            meta.setdefault("llm_ms", 0)
+            meta.setdefault("db_ms", 0)
+            meta["total_ms"] = int((time.perf_counter() - total_start) * 1000)
+            if debug:
+                _print_debug_timings(meta)
+            outcome = {
+                "answer": shortcut.get("answer"),
+                "meta": meta,
+            }
+            if resolution:
+                outcome["resolver"] = resolution
+            return outcome
+
+        meta = dict(shortcut.get("meta") or {})
+        meta.setdefault("resolver_ms", resolver_ms)
+        meta.setdefault("db_ms", meta.get("db_ms", 0))
+        meta.setdefault("llm_ms", 0)
+        meta["total_ms"] = int((time.perf_counter() - total_start) * 1000)
+        execution = dict(shortcut.get("execution") or {})
+        execution_meta = dict(execution.get("meta") or {})
+        execution_meta.update({k: meta[k] for k in ("resolver_ms", "db_ms", "llm_ms", "total_ms") if k in meta})
+        execution["meta"] = execution_meta
+        if "row_count" not in execution:
+            answer = shortcut.get("answer")
+            execution["row_count"] = len(answer) if isinstance(answer, list) else 1
+        outcome = {
+            "sql": shortcut["sql"],
+            "execution": execution,
+            "answer": shortcut.get("answer"),
+            "meta": meta,
+        }
+        if resolution:
+            outcome["resolver"] = resolution
+        if debug:
+            _print_debug_timings(meta)
+        return outcome
+
+    llm_start = time.perf_counter()
     if retry:
         sql = plan_sql_with_retry(
             nl_request,
@@ -357,13 +439,39 @@ def plan_and_execute(
             force_refresh_schema=refresh_schema,
             param_hints=param_hints,
         )
+    llm_ms = int((time.perf_counter() - llm_start) * 1000)
 
     param_hints = _apply_limit_hint(sql, nl_request, param_hints)
+    db_start = time.perf_counter()
     execution = execute_sql(sql, params=param_hints, allow_writes=allow_writes, force_write=force_write)
-    return {
+    db_ms = int((time.perf_counter() - db_start) * 1000)
+    total_ms = int((time.perf_counter() - total_start) * 1000)
+
+    meta = {
+        "intent": (resolution or {}).get("intent", "unknown"),
+        "resolver_ms": resolver_ms,
+        "llm_ms": llm_ms,
+        "db_ms": db_ms,
+        "total_ms": total_ms,
+    }
+
+    if debug:
+        _print_debug_timings(meta)
+
+    if isinstance(execution, dict):
+        execution = dict(execution)
+        exec_meta = dict(execution.get("meta") or {})
+        exec_meta.update({k: meta[k] for k in ("resolver_ms", "llm_ms", "db_ms", "total_ms") if k in meta})
+        execution["meta"] = exec_meta
+
+    outcome = {
         "sql": sql,
         "execution": execution,
+        "meta": meta,
     }
+    if resolution:
+        outcome["resolver"] = resolution
+    return outcome
 
 
 def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -> None:

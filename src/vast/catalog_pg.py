@@ -403,6 +403,32 @@ def build_schema_cards() -> Dict[str, Dict[str, Any]]:
             "aliases": aliases,
         }
 
+        card = cards[key]
+        alias_set = set(card.get("aliases") or [])
+        table_name = card.get("table") or ""
+        if table_name:
+            table_lower = table_name.lower()
+            alias_set.add(_normalize_alias(table_lower))
+            if not table_lower.endswith("s"):
+                alias_set.add(_normalize_alias(f"{table_lower}s"))
+            if table_lower.endswith("s") and len(table_lower) > 1:
+                alias_set.add(_normalize_alias(table_lower[:-1]))
+
+        colnames = {
+            (str(col.get("name")) or "").lower()
+            for col in card.get("columns") or []
+            if col.get("name")
+        }
+
+        if {"email", "username", "last_login", "is_active"} & colnames:
+            alias_set.update(_normalize_alias(value) for value in ("user", "users", "account", "member"))
+        if {"slug", "name"} & colnames:
+            alias_set.update(_normalize_alias(value) for value in ("brand", "brands", "profile"))
+        if {"price", "currency", "sku", "upc"} & colnames:
+            alias_set.update(_normalize_alias(value) for value in ("product", "products", "item", "items"))
+
+        card["aliases"] = sorted(alias_set)
+
     return cards
 
 

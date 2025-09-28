@@ -2,9 +2,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Any, Callable, Tuple
 
 from openai import OpenAI
 from rich.console import Console
@@ -13,6 +14,8 @@ from .config import settings
 from .introspect import list_tables, table_columns
 from .db import safe_execute, get_engine
 from .knowledge import get_knowledge_store
+from .catalog_pg import load_schema_cards
+from .resolver import resolve_entities, run_template_count, run_template_list
 from .identifier_guard import (
     ensure_valid_identifiers,
     IdentifierValidationError,
@@ -39,6 +42,118 @@ Rules:
 - Return ONLY the SQL — no prose, no backticks, no code fences, no comments.
 - Output exactly one SQL statement (no multiple statements).
 """
+
+
+def resolver_shortcut(
+    nl_request: str,
+    cards: Dict[str, Dict[str, Any]] | None = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any] | None]:
+    """Run the deterministic resolver and return an optional shortcut result."""
+
+    try:
+        catalog = cards if cards is not None else load_schema_cards(refresh=False)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Failed to load schema cards for resolver: %s", exc)
+        catalog = {}
+
+    t0 = time.perf_counter()
+    try:
+        resolution = resolve_entities(nl_request or "", catalog)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Resolver failed for request %r: %s", nl_request, exc)
+        resolution = {"intent": "unknown", "candidates": []}
+    resolver_ms = int((time.perf_counter() - t0) * 1000)
+
+    meta = dict(resolution.get("meta") or {})
+    meta["resolver_ms"] = resolver_ms
+    resolution["meta"] = meta
+
+    candidates = resolution.get("candidates") or []
+
+    def _has_clear_lead() -> bool:
+        if not candidates:
+            return False
+        if len(candidates) == 1:
+            return True
+        try:
+            return float(candidates[0]["score"]) - float(candidates[1]["score"]) >= 0.15
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    intent = resolution.get("intent")
+
+    if intent in {"count", "list"}:
+        if not candidates:
+            clarification = {
+                "answer": "I don’t see a matching table for that. Tell me the table (e.g., public.brand) and I’ll run it.",
+                "meta": {"intent": intent, "reason": "no_candidates", "resolver_ms": resolver_ms, "llm_ms": 0, "db_ms": 0},
+            }
+            return resolution, clarification
+
+        if len(candidates) >= 2:
+            try:
+                margin = float(candidates[0]["score"]) - float(candidates[1]["score"])
+            except Exception:  # pragma: no cover - defensive
+                margin = 0.0
+            if margin < 0.15:
+                options = ", ".join(
+                    f'{c["schema"]}.{c["table"]}' for c in candidates[:3]
+                )
+                clarification = {
+                    "answer": f"Did you mean one of these tables: {options}? Reply with one and I’ll proceed.",
+                    "meta": {"intent": intent, "reason": "ambiguous", "resolver_ms": resolver_ms, "llm_ms": 0, "db_ms": 0},
+                }
+                return resolution, clarification
+
+    if intent == "count" and _has_clear_lead():
+        top = candidates[0]
+        d0 = time.perf_counter()
+        count_value = run_template_count(top["schema"], top["table"])
+        db_ms = int((time.perf_counter() - d0) * 1000)
+        result = {
+            "answer": f"{count_value}",
+            "sql": f'SELECT COUNT(*) FROM "{top["schema"]}"."{top["table"]}";',
+            "meta": {"intent": "count", "resolver_ms": resolver_ms, "db_ms": db_ms, "llm_ms": 0},
+            "execution": {
+                "rows": [{"count": int(count_value)}],
+                "success": True,
+                "row_count": 1,
+                "dry_run": False,
+            },
+        }
+        return resolution, result
+
+    if intent == "list" and _has_clear_lead():
+        top = candidates[0]
+        column_hints = resolution.get("column_hints") or []
+        column_name = column_hints[0] if column_hints else None
+
+        if not column_name:
+            card = catalog.get(f'{top["schema"]}.{top["table"]}', {})
+            for column in card.get("columns") or []:
+                col_type = str(column.get("type") or "").lower()
+                if col_type in {"text", "varchar", "character varying"} and column.get("name"):
+                    column_name = column["name"]
+                    break
+
+        if column_name:
+            d0 = time.perf_counter()
+            rows = run_template_list(top["schema"], top["table"], column_name, limit=50)
+            db_ms = int((time.perf_counter() - d0) * 1000)
+            result = {
+                "answer": rows,
+                "sql": f'SELECT "{column_name}" FROM "{top["schema"]}"."{top["table"]}" LIMIT 50;',
+                "meta": {"intent": "list", "resolver_ms": resolver_ms, "db_ms": db_ms, "llm_ms": 0},
+                "execution": {
+                    "rows": rows,
+                    "success": True,
+                    "row_count": len(rows),
+                    "dry_run": False,
+                },
+            }
+            return resolution, result
+
+    return resolution, None
 
 def schema_summary(max_tables: int = 18, max_cols_per_table: int = 12) -> str:
     # keep context leaner to avoid model choking

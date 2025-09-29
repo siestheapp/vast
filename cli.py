@@ -192,8 +192,9 @@ def columns(schema: str, table: str):
 
 @catalog_app.command("build")
 def catalog_build():
-    cards = load_schema_cards_pg(refresh=True)
-    fingerprint = catalog_schema_fingerprint(cards)
+    catalog = load_schema_cards_pg(refresh=True)
+    cards = catalog.get("cards", {})
+    fingerprint = catalog.get("fingerprint") or catalog_schema_fingerprint(cards)
     table_count = len(cards)
     column_count = sum(len(card.get("columns") or []) for card in cards.values())
     print(f"Built {table_count} tables, {column_count} columns, fingerprint {fingerprint}")
@@ -203,7 +204,9 @@ def catalog_build():
 def catalog_show(
     table: Optional[str] = typer.Argument(None, help="Table name to display (schema.table)"),
 ):
-    cards = load_schema_cards_pg(refresh=False)
+    catalog = load_schema_cards_pg(refresh=False)
+    cards = catalog.get("cards", {})
+    fingerprint = catalog.get("fingerprint") or catalog_schema_fingerprint(cards)
     if not cards:
         print("[yellow]No schema cards available. Run `catalog build` first.[/]")
         raise typer.Exit(code=0)
@@ -227,7 +230,6 @@ def catalog_show(
         print(json.dumps(matched, indent=2))
         raise typer.Exit(code=0)
 
-    fingerprint = catalog_schema_fingerprint(cards)
     print(f"Schema catalog contains {len(cards)} tables (fingerprint {fingerprint}).")
     for key in sorted(cards, key=lambda k: (cards[k]["schema"], cards[k]["table"])):
         card = cards[key]

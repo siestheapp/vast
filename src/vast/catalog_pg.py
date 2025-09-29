@@ -11,7 +11,7 @@ from sqlalchemy import String, bindparam, inspect, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 
-from .db import get_engine
+from .db import get_ro_engine
 from .introspect import fingerprint_from_columns, list_tables
 
 logger = logging.getLogger(__name__)
@@ -49,10 +49,13 @@ _ALIAS_SEEDS = {
     "companies": ["company", "organization", "org"],
 }
 
+_CARDS_CACHE: Dict[str, Dict[str, Any]] | None = None
+_CARDS_FP: Optional[str] = None
+
 
 def _fetch_all(sql: str, params: dict | None = None) -> List[Dict[str, object]]:
     """Execute the SQL against the read-only engine and return plain dict rows."""
-    with get_engine(readonly=True).begin() as conn:
+    with get_ro_engine().begin() as conn:
         result = conn.execute(text(sql), params or {})
         return [dict(row) for row in result.mappings()]
 
@@ -279,7 +282,7 @@ def _collect_aliases(table_name: str, columns: List[Dict[str, Any]], comment: Op
 
 
 def build_schema_cards() -> Dict[str, Dict[str, Any]]:
-    engine = get_engine(readonly=True)
+    engine = get_ro_engine()
     insp = inspect(engine)
     cards: Dict[str, Dict[str, Any]] = {}
 
@@ -408,11 +411,16 @@ def build_schema_cards() -> Dict[str, Dict[str, Any]]:
         table_name = card.get("table") or ""
         if table_name:
             table_lower = table_name.lower()
+            alias_set.add(table_lower)
+            alias_set.add(table_name)
             alias_set.add(_normalize_alias(table_lower))
             if not table_lower.endswith("s"):
+                alias_set.add(f"{table_lower}s")
                 alias_set.add(_normalize_alias(f"{table_lower}s"))
             if table_lower.endswith("s") and len(table_lower) > 1:
-                alias_set.add(_normalize_alias(table_lower[:-1]))
+                singular = table_lower[:-1]
+                alias_set.add(singular)
+                alias_set.add(_normalize_alias(singular))
 
         colnames = {
             (str(col.get("name")) or "").lower()
@@ -427,7 +435,7 @@ def build_schema_cards() -> Dict[str, Dict[str, Any]]:
         if {"price", "currency", "sku", "upc"} & colnames:
             alias_set.update(_normalize_alias(value) for value in ("product", "products", "item", "items"))
 
-        card["aliases"] = sorted(alias_set)
+        card["aliases"] = sorted(alias for alias in alias_set if alias)
 
     return cards
 
@@ -450,7 +458,7 @@ def _card_path(schema: str, table: str) -> Path:
     return CARDS_DIR / f"{schema}.{table}.json"
 
 
-def save_schema_cards(cards: Dict[str, Dict[str, Any]]) -> None:
+def save_schema_cards(cards: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     CARDS_DIR.mkdir(parents=True, exist_ok=True)
 
     for card in cards.values():
@@ -473,9 +481,9 @@ def save_schema_cards(cards: Dict[str, Dict[str, Any]]) -> None:
         )
 
     INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    INDEX_PATH.write_text(
-        json.dumps({"fingerprint": fp, "tables": tables_index}, indent=2, sort_keys=True)
-    )
+    index_payload = {"fingerprint": fp, "tables": tables_index}
+    INDEX_PATH.write_text(json.dumps(index_payload, indent=2, sort_keys=True))
+    return index_payload
 
 
 def _load_cards_from_disk(table_entries: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -496,26 +504,33 @@ def _load_cards_from_disk(table_entries: Sequence[Dict[str, Any]]) -> Optional[D
     return cards
 
 
-def load_schema_cards(refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+def load_schema_cards(refresh: bool = False) -> Dict[str, Any]:
+    def _package(cards: Dict[str, Dict[str, Any]], meta: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "cards": cards,
+            "fingerprint": meta.get("fingerprint"),
+            "tables": meta.get("tables", []),
+        }
+
     if refresh or not INDEX_PATH.exists():
         cards = build_schema_cards()
-        save_schema_cards(cards)
-        return cards
+        meta = save_schema_cards(cards)
+        return _package(cards, meta)
 
     try:
         index_data = json.loads(INDEX_PATH.read_text())
     except json.JSONDecodeError:
         logger.warning("Schema index corrupted; rebuilding catalog")
         cards = build_schema_cards()
-        save_schema_cards(cards)
-        return cards
+        meta = save_schema_cards(cards)
+        return _package(cards, meta)
 
     tables_entry = index_data.get("tables") or []
     cards = _load_cards_from_disk(tables_entry)
     if cards is None:
         cards = build_schema_cards()
-        save_schema_cards(cards)
-        return cards
+        meta = save_schema_cards(cards)
+        return _package(cards, meta)
 
     stored_fp = index_data.get("fingerprint")
     current_fp: Optional[str] = None
@@ -528,10 +543,33 @@ def load_schema_cards(refresh: bool = False) -> Dict[str, Dict[str, Any]]:
 
     if stored_fp and current_fp and stored_fp != current_fp:
         cards = build_schema_cards()
-        save_schema_cards(cards)
-        return cards
+        meta = save_schema_cards(cards)
+        return _package(cards, meta)
 
-    return cards
+    return {
+        "cards": cards,
+        "fingerprint": stored_fp or current_fp,
+        "tables": tables_entry,
+    }
+
+
+def get_cached_cards() -> Dict[str, Dict[str, Any]]:
+    global _CARDS_CACHE, _CARDS_FP
+    if _CARDS_CACHE is not None:
+        try:
+            index_data = json.loads(INDEX_PATH.read_text())
+            fingerprint = index_data.get("fingerprint")
+            if not fingerprint or fingerprint == _CARDS_FP:
+                return _CARDS_CACHE
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    payload = load_schema_cards(refresh=_CARDS_CACHE is None)
+    cards = payload.get("cards") or {}
+    fingerprint = payload.get("fingerprint")
+    _CARDS_CACHE = cards
+    _CARDS_FP = fingerprint
+    return _CARDS_CACHE or {}
 
 
 def table_aliases(cards: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
@@ -544,6 +582,7 @@ def table_aliases(cards: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
 
 __all__ = [
     "load_schema_cards",
+    "get_cached_cards",
     "build_schema_cards",
     "save_schema_cards",
     "schema_fingerprint",

@@ -21,7 +21,7 @@ from .agent import (
     resolver_shortcut,
 )
 from .config import settings
-from .db import get_engine
+from .db import get_engine, get_ro_engine
 from .introspect import list_tables, table_columns
 from .identifier_guard import extract_requested_identifiers
 from .sql_params import hydrate_readonly_params, normalize_limit_literal, stmt_kind
@@ -113,15 +113,19 @@ def looks_like_sql(text: str | None) -> bool:
 
 
 def _print_debug_timings(meta: Dict[str, Any]) -> None:
-    resolver_ms = meta.get("resolver_ms", 0)
+    catalog_ms = meta.get("catalog_ms", 0)
+    plan_ms = meta.get("plan_ms", 0)
+    engine_ms = meta.get("engine_ms", 0)
+    exec_ms = meta.get("exec_ms", 0)
     llm_ms = meta.get("llm_ms", 0)
-    db_ms = meta.get("db_ms", 0)
     total_ms = meta.get("total_ms", 0)
     print(
-        "debug timing → resolver_ms={resolver_ms} llm_ms={llm_ms} db_ms={db_ms} total_ms={total_ms}".format(
-            resolver_ms=resolver_ms,
+        "debug timing → catalog_ms={catalog_ms} plan_ms={plan_ms} engine_ms={engine_ms} exec_ms={exec_ms} llm_ms={llm_ms} total_ms={total_ms}".format(
+            catalog_ms=catalog_ms,
+            plan_ms=plan_ms,
+            engine_ms=engine_ms,
+            exec_ms=exec_ms,
             llm_ms=llm_ms,
-            db_ms=db_ms,
             total_ms=total_ms,
         )
     )
@@ -299,6 +303,11 @@ def execute_sql(
         hydrated_params = dict(hydrated_params or {})
         hydrated_params["limit"] = infer_limit_from_text(sql, _default_limit())
     summary = load_or_build_schema_summary()
+    engine_ms = 0
+    if not allow_writes:
+        engine_start = time.perf_counter()
+        get_ro_engine()
+        engine_ms = int((time.perf_counter() - engine_start) * 1000)
     engine = get_engine(readonly=True)
     requested = extract_requested_identifiers(normalized_sql)
     _ensure_valid_identifiers(
@@ -308,17 +317,23 @@ def execute_sql(
         params=hydrated_params,
         requested=requested,
     )
+    exec_start = time.perf_counter()
     rows = safe_execute(
         normalized_sql,
         params=hydrated_params or {},
         allow_writes=allow_writes,
         force_write=force_write,
     )
+    exec_ms = int((time.perf_counter() - exec_start) * 1000)
     serialised, dry_run = _serialize_rows(rows)
     return {
         "rows": serialised,
         "row_count": 0 if dry_run else len(serialised),
         "dry_run": dry_run,
+        "meta": {
+            "engine_ms": engine_ms,
+            "exec_ms": exec_ms,
+        },
     }
 
 
@@ -338,7 +353,9 @@ def plan_and_execute(
     param_hints = dict(params or {})
     is_sql = looks_like_sql(nl_request)
     resolution: Dict[str, Any] | None = None
-    resolver_ms = 0
+    catalog_ms = 0
+    plan_ms = 0
+    llm_ms = 0
 
     if is_sql:
         param_hints = _apply_limit_hint(nl_request, nl_request, param_hints)
@@ -350,21 +367,33 @@ def plan_and_execute(
             schema_summary=summary,
             params=param_hints,
         )
-        db_start = time.perf_counter()
         execution = execute_sql(
             nl_request,
             params=param_hints,
             allow_writes=allow_writes,
             force_write=force_write,
         )
-        db_ms = int((time.perf_counter() - db_start) * 1000)
         total_ms = int((time.perf_counter() - total_start) * 1000)
-        meta = {"resolver_ms": 0, "llm_ms": 0, "db_ms": db_ms, "total_ms": total_ms}
+        exec_meta = execution.get("meta", {}) if isinstance(execution, dict) else {}
+        engine_ms = exec_meta.get("engine_ms", 0)
+        exec_ms = exec_meta.get("exec_ms", 0)
+        meta = {
+            "intent": "sql",
+            "catalog_ms": 0,
+            "plan_ms": 0,
+            "engine_ms": engine_ms,
+            "exec_ms": exec_ms,
+            "llm_ms": 0,
+            "total_ms": total_ms,
+        }
         if debug:
             _print_debug_timings(meta)
         if isinstance(execution, dict):
             execution = dict(execution)
-            execution["meta"] = meta
+            existing_meta = dict(execution.get("meta") or {})
+            existing_meta.setdefault("engine_ms", engine_ms)
+            existing_meta.setdefault("exec_ms", exec_ms)
+            execution["meta"] = existing_meta
         return {
             "sql": nl_request,
             "execution": execution,
@@ -378,15 +407,20 @@ def plan_and_execute(
         logger.debug("Resolver shortcut failed: %s", exc)
         resolution, shortcut = None, None
 
+    resolution_meta = {}
     if resolution:
-        resolver_ms = int(resolution.get("meta", {}).get("resolver_ms", 0))
+        resolution_meta = resolution.get("meta", {}) or {}
+        catalog_ms = resolution_meta.get("catalog_ms", 0)
+        plan_ms = resolution_meta.get("plan_ms", 0)
 
     if shortcut:
         if "sql" not in shortcut:
             meta = dict(shortcut.get("meta") or {})
-            meta.setdefault("resolver_ms", resolver_ms)
+            meta.setdefault("catalog_ms", catalog_ms)
+            meta.setdefault("plan_ms", plan_ms)
+            meta.setdefault("engine_ms", meta.get("engine_ms", 0))
+            meta.setdefault("exec_ms", meta.get("exec_ms", 0))
             meta.setdefault("llm_ms", 0)
-            meta.setdefault("db_ms", 0)
             meta["total_ms"] = int((time.perf_counter() - total_start) * 1000)
             if debug:
                 _print_debug_timings(meta)
@@ -399,13 +433,16 @@ def plan_and_execute(
             return outcome
 
         meta = dict(shortcut.get("meta") or {})
-        meta.setdefault("resolver_ms", resolver_ms)
-        meta.setdefault("db_ms", meta.get("db_ms", 0))
+        meta.setdefault("catalog_ms", catalog_ms)
+        meta.setdefault("plan_ms", plan_ms)
+        meta.setdefault("engine_ms", meta.get("engine_ms", 0))
+        meta.setdefault("exec_ms", meta.get("exec_ms", 0))
         meta.setdefault("llm_ms", 0)
         meta["total_ms"] = int((time.perf_counter() - total_start) * 1000)
         execution = dict(shortcut.get("execution") or {})
         execution_meta = dict(execution.get("meta") or {})
-        execution_meta.update({k: meta[k] for k in ("resolver_ms", "db_ms", "llm_ms", "total_ms") if k in meta})
+        execution_meta.setdefault("engine_ms", meta.get("engine_ms", 0))
+        execution_meta.setdefault("exec_ms", meta.get("exec_ms", 0))
         execution["meta"] = execution_meta
         if "row_count" not in execution:
             answer = shortcut.get("answer")
@@ -442,16 +479,20 @@ def plan_and_execute(
     llm_ms = int((time.perf_counter() - llm_start) * 1000)
 
     param_hints = _apply_limit_hint(sql, nl_request, param_hints)
-    db_start = time.perf_counter()
     execution = execute_sql(sql, params=param_hints, allow_writes=allow_writes, force_write=force_write)
-    db_ms = int((time.perf_counter() - db_start) * 1000)
     total_ms = int((time.perf_counter() - total_start) * 1000)
+
+    execution_meta = execution.get("meta", {}) if isinstance(execution, dict) else {}
+    engine_ms = execution_meta.get("engine_ms", 0)
+    exec_ms = execution_meta.get("exec_ms", 0)
 
     meta = {
         "intent": (resolution or {}).get("intent", "unknown"),
-        "resolver_ms": resolver_ms,
+        "catalog_ms": catalog_ms,
+        "plan_ms": plan_ms,
+        "engine_ms": engine_ms,
+        "exec_ms": exec_ms,
         "llm_ms": llm_ms,
-        "db_ms": db_ms,
         "total_ms": total_ms,
     }
 
@@ -461,7 +502,8 @@ def plan_and_execute(
     if isinstance(execution, dict):
         execution = dict(execution)
         exec_meta = dict(execution.get("meta") or {})
-        exec_meta.update({k: meta[k] for k in ("resolver_ms", "llm_ms", "db_ms", "total_ms") if k in meta})
+        exec_meta.setdefault("engine_ms", engine_ms)
+        exec_meta.setdefault("exec_ms", exec_ms)
         execution["meta"] = exec_meta
 
     outcome = {

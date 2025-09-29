@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+import time
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from .db import get_engine
+from .db import get_ro_engine
 
 _TEXT_TYPES = {"char", "varchar", "text", "citext", "name", "uuid"}
 _PREFERRED_LIST_COLUMNS = ["username", "email", "name", "slug", "title"]
@@ -51,24 +52,35 @@ def resolve_entities(utterance: str, cards: Dict[str, Dict[str, Any]]) -> Dict[s
     }
 
 
-def run_template_count(schema: str, table: str) -> int:
+def run_template_count(schema: str, table: str) -> Tuple[int, Dict[str, int]]:
     """Execute a deterministic COUNT template for the requested table."""
 
-    engine = get_engine(readonly=True)
+    engine_start = time.perf_counter()
+    engine = get_ro_engine()
+    engine_ms = int((time.perf_counter() - engine_start) * 1000)
     qualified = _qualified_identifier(engine, schema, table)
     query = text(f"SELECT COUNT(*) AS count FROM {qualified}")
 
     with engine.begin() as conn:
         conn.execute(text(f"SET LOCAL statement_timeout = '{_TIMEOUT_MS}ms'"))
+        exec_start = time.perf_counter()
         result = conn.execute(query).scalar()
+        exec_ms = int((time.perf_counter() - exec_start) * 1000)
 
-    return int(result or 0)
+    return int(result or 0), {"engine_ms": engine_ms, "exec_ms": exec_ms}
 
 
-def run_template_list(schema: str, table: str, column: str, limit: int = 50) -> List[Dict[str, Any]]:
+def run_template_list(
+    schema: str,
+    table: str,
+    column: str,
+    limit: int = 50,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Execute a deterministic SELECT template returning a single column."""
 
-    engine = get_engine(readonly=True)
+    engine_start = time.perf_counter()
+    engine = get_ro_engine()
+    engine_ms = int((time.perf_counter() - engine_start) * 1000)
     qualified = _qualified_identifier(engine, schema, table)
     quoted_column = _quote_column(engine, column)
     alias = _quote_column(engine, column)
@@ -80,9 +92,11 @@ def run_template_list(schema: str, table: str, column: str, limit: int = 50) -> 
 
     with engine.begin() as conn:
         conn.execute(text(f"SET LOCAL statement_timeout = '{_TIMEOUT_MS}ms'"))
+        exec_start = time.perf_counter()
         result = conn.execute(query, {"limit": int(max(1, limit))}).mappings().all()
+        exec_ms = int((time.perf_counter() - exec_start) * 1000)
 
-    return [dict(row) for row in result]
+    return [dict(row) for row in result], {"engine_ms": engine_ms, "exec_ms": exec_ms}
 
 
 def _detect_intent(utterance: str) -> str:

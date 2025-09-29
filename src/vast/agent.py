@@ -14,7 +14,7 @@ from .config import settings
 from .introspect import list_tables, table_columns
 from .db import safe_execute, get_engine
 from .knowledge import get_knowledge_store
-from .catalog_pg import load_schema_cards
+from .catalog_pg import get_cached_cards
 from .resolver import resolve_entities, run_template_count, run_template_list
 from .identifier_guard import (
     ensure_valid_identifiers,
@@ -50,22 +50,29 @@ def resolver_shortcut(
 ) -> Tuple[Dict[str, Any], Dict[str, Any] | None]:
     """Run the deterministic resolver and return an optional shortcut result."""
 
-    try:
-        catalog = cards if cards is not None else load_schema_cards(refresh=False)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("Failed to load schema cards for resolver: %s", exc)
-        catalog = {}
+    catalog_ms = 0
+    if cards is not None:
+        catalog = cards
+    else:
+        catalog_start = time.perf_counter()
+        try:
+            catalog = get_cached_cards()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to load schema cards for resolver: %s", exc)
+            catalog = {}
+        catalog_ms = int((time.perf_counter() - catalog_start) * 1000)
 
-    t0 = time.perf_counter()
+    plan_start = time.perf_counter()
     try:
-        resolution = resolve_entities(nl_request or "", catalog)
+        resolution = resolve_entities(nl_request or "", catalog or {})
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Resolver failed for request %r: %s", nl_request, exc)
         resolution = {"intent": "unknown", "candidates": []}
-    resolver_ms = int((time.perf_counter() - t0) * 1000)
+    plan_ms = int((time.perf_counter() - plan_start) * 1000)
 
     meta = dict(resolution.get("meta") or {})
-    meta["resolver_ms"] = resolver_ms
+    meta["catalog_ms"] = catalog_ms
+    meta["plan_ms"] = plan_ms
     resolution["meta"] = meta
 
     candidates = resolution.get("candidates") or []
@@ -86,7 +93,15 @@ def resolver_shortcut(
         if not candidates:
             clarification = {
                 "answer": "I don’t see a matching table for that. Tell me the table (e.g., public.brand) and I’ll run it.",
-                "meta": {"intent": intent, "reason": "no_candidates", "resolver_ms": resolver_ms, "llm_ms": 0, "db_ms": 0},
+                "meta": {
+                    "intent": intent,
+                    "reason": "no_candidates",
+                    "catalog_ms": catalog_ms,
+                    "plan_ms": plan_ms,
+                    "engine_ms": 0,
+                    "exec_ms": 0,
+                    "llm_ms": 0,
+                },
             }
             return resolution, clarification
 
@@ -101,24 +116,43 @@ def resolver_shortcut(
                 )
                 clarification = {
                     "answer": f"Did you mean one of these tables: {options}? Reply with one and I’ll proceed.",
-                    "meta": {"intent": intent, "reason": "ambiguous", "resolver_ms": resolver_ms, "llm_ms": 0, "db_ms": 0},
+                    "meta": {
+                        "intent": intent,
+                        "reason": "ambiguous",
+                        "catalog_ms": catalog_ms,
+                        "plan_ms": plan_ms,
+                        "engine_ms": 0,
+                        "exec_ms": 0,
+                        "llm_ms": 0,
+                    },
                 }
                 return resolution, clarification
 
     if intent == "count" and _has_clear_lead():
         top = candidates[0]
-        d0 = time.perf_counter()
-        count_value = run_template_count(top["schema"], top["table"])
-        db_ms = int((time.perf_counter() - d0) * 1000)
+        count_value, timing = run_template_count(top["schema"], top["table"])
+        engine_ms = timing.get("engine_ms", 0)
+        exec_ms = timing.get("exec_ms", 0)
         result = {
             "answer": f"{count_value}",
             "sql": f'SELECT COUNT(*) FROM "{top["schema"]}"."{top["table"]}";',
-            "meta": {"intent": "count", "resolver_ms": resolver_ms, "db_ms": db_ms, "llm_ms": 0},
+            "meta": {
+                "intent": "count",
+                "catalog_ms": catalog_ms,
+                "plan_ms": plan_ms,
+                "engine_ms": engine_ms,
+                "exec_ms": exec_ms,
+                "llm_ms": 0,
+            },
             "execution": {
                 "rows": [{"count": int(count_value)}],
                 "success": True,
                 "row_count": 1,
                 "dry_run": False,
+                "meta": {
+                    "engine_ms": engine_ms,
+                    "exec_ms": exec_ms,
+                },
             },
         }
         return resolution, result
@@ -137,18 +171,29 @@ def resolver_shortcut(
                     break
 
         if column_name:
-            d0 = time.perf_counter()
-            rows = run_template_list(top["schema"], top["table"], column_name, limit=50)
-            db_ms = int((time.perf_counter() - d0) * 1000)
+            rows, timing = run_template_list(top["schema"], top["table"], column_name, limit=50)
+            engine_ms = timing.get("engine_ms", 0)
+            exec_ms = timing.get("exec_ms", 0)
             result = {
                 "answer": rows,
                 "sql": f'SELECT "{column_name}" FROM "{top["schema"]}"."{top["table"]}" LIMIT 50;',
-                "meta": {"intent": "list", "resolver_ms": resolver_ms, "db_ms": db_ms, "llm_ms": 0},
+                "meta": {
+                    "intent": "list",
+                    "catalog_ms": catalog_ms,
+                    "plan_ms": plan_ms,
+                    "engine_ms": engine_ms,
+                    "exec_ms": exec_ms,
+                    "llm_ms": 0,
+                },
                 "execution": {
                     "rows": rows,
                     "success": True,
                     "row_count": len(rows),
                     "dry_run": False,
+                    "meta": {
+                        "engine_ms": engine_ms,
+                        "exec_ms": exec_ms,
+                    },
                 },
             }
             return resolution, result

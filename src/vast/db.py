@@ -36,12 +36,32 @@ def _mk_engine(url: str) -> Engine:
     )
 
 
+def get_ro_engine() -> Engine:
+    global _engine_ro
+    if _engine_ro is None:
+        url = read_url()
+        connect_args = {
+            "application_name": "vast_ro",
+            "options": (
+                f"-c statement_timeout={settings.default_statement_timeout_ms}"
+                f" -c idle_in_transaction_session_timeout={settings.idle_in_tx_timeout_ms}"
+            ),
+        }
+        _engine_ro = create_engine(
+            url,
+            pool_size=3,
+            max_overflow=0,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args=connect_args,
+        )
+    return _engine_ro
+
+
 def get_engine(readonly: bool = True) -> Engine:
     global _engine_ro, _engine_rw
     if readonly:
-        if _engine_ro is None:
-            _engine_ro = _mk_engine(read_url())
-        return _engine_ro
+        return get_ro_engine()
     else:
         if _engine_rw is None:
             _engine_rw = _mk_engine(write_url())
@@ -114,7 +134,7 @@ def _estimate_write_rows(sql: str, params: dict | None) -> Optional[int]:
     Returns None if estimate unavailable.
     """
     explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
-    with get_engine(readonly=True).begin() as conn:  # EXPLAIN is read-only
+    with get_ro_engine().begin() as conn:  # EXPLAIN is read-only
         res = conn.execute(text(explain_sql), params or {})
         row = res.fetchone()
         if not row:
@@ -176,7 +196,7 @@ def safe_execute(
                 result = list(conn.execute(text(normalized_sql), params or {}))
         else:
             # READ path — strictly RO engine
-            with get_engine(readonly=True).begin() as conn:
+            with get_ro_engine().begin() as conn:
                 result = list(conn.execute(text(normalized_sql), params or {}))
 
         # after success

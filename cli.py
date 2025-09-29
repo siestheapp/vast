@@ -359,7 +359,9 @@ def ask(
     ),
     debug: bool = typer.Option(False, "--debug", help="Print timing details for resolver/LLM/db"),
 ):
-    if not (os.getenv("DATABASE_URL_RO") or os.getenv("DATABASE_URL")):
+    try:
+        get_ro_url()  # This will use the settings configuration that loads from .env
+    except Exception as exc:
         typer.echo(
             "Missing required env: set DATABASE_URL_RO (or legacy DATABASE_URL).\n"
             "For example:\n"
@@ -423,7 +425,9 @@ def demo_writes(
         help="Suppress connection diagnostics",
     )
 ) -> None:
-    if not (os.getenv("DATABASE_URL_RO") or os.getenv("DATABASE_URL")):
+    try:
+        get_ro_url()  # This will use the settings configuration that loads from .env
+    except Exception as exc:
         typer.echo(
             "Missing required env: set DATABASE_URL_RO (or legacy DATABASE_URL).\n"
             "For example:\n"

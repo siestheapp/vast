@@ -2,6 +2,7 @@ import pytest
 
 from src.vast import service
 from src.vast.identifier_guard import IdentifierValidationError
+from src.vast.agent import PlanResult
 
 
 def _raise_planner(*args, **kwargs):
@@ -52,7 +53,7 @@ def test_planner_for_nl_text(monkeypatch):
 
     def fake_plan(*args, **kwargs):
         planner_called["count"] += 1
-        return "SELECT title FROM public.film LIMIT 1"
+        return PlanResult(sql="SELECT title FROM public.film LIMIT 1")
 
     def fake_execute_sql(sql, **kwargs):
         return {"rows": []}

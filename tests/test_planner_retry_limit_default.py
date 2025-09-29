@@ -1,13 +1,13 @@
 from types import SimpleNamespace
 
-from src.vast.agent import plan_sql_with_retry
+from src.vast.agent import plan_sql_with_retry, PlanResult
 
 
 def test_planner_normalizes_limit_literal(monkeypatch):
     captured = {}
 
     def fake_plan_sql(*args, **kwargs):
-        return "SELECT title FROM public.film LIMIT :limit"
+        return PlanResult(sql="SELECT title FROM public.film LIMIT :limit")
 
     def fake_safe_execute(sql, params=None, allow_writes=False, force_write=False):
         captured["sql"] = sql
@@ -20,9 +20,10 @@ def test_planner_normalizes_limit_literal(monkeypatch):
     monkeypatch.setattr("src.vast.agent.load_or_build_schema_summary", lambda *a, **k: "summary")
     monkeypatch.setattr("src.vast.agent.get_engine", lambda readonly=True: SimpleNamespace())
 
-    sql = plan_sql_with_retry("return the latest film", allow_writes=False, max_retries=1)
+    result = plan_sql_with_retry("return the latest film", allow_writes=False, max_retries=1)
 
-    assert sql.strip().upper().endswith("LIMIT 10")
+    assert isinstance(result, PlanResult)
+    assert result.sql.strip().upper().endswith("LIMIT 10;")
     assert captured["sql"].strip().upper().endswith("LIMIT 10")
     assert captured["params"] == {"limit": 10}
 
@@ -31,7 +32,7 @@ def test_plan_and_execute_infers_limit_from_prompt(monkeypatch):
     captured = {}
 
     def fake_plan_sql_with_retry(*args, **kwargs):
-        return "SELECT title FROM public.film ORDER BY film_id DESC LIMIT :limit"
+        return PlanResult(sql="SELECT title FROM public.film ORDER BY film_id DESC LIMIT :limit")
 
     def fake_execute_sql(sql, params=None, allow_writes=False, force_write=False):
         captured["sql"] = sql
@@ -48,5 +49,5 @@ def test_plan_and_execute_infers_limit_from_prompt(monkeypatch):
 
     result = service.plan_and_execute("top 5 films", allow_writes=False, max_retries=1)
 
-    assert result["sql"].strip().upper().endswith("LIMIT :LIMIT")
+    assert result["sql"].strip().upper().endswith("LIMIT :LIMIT;")
     assert captured["params"]["limit"] == 5

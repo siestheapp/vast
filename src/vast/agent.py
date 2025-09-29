@@ -3,9 +3,10 @@ import hashlib
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 
 from openai import OpenAI
 from rich.console import Console
@@ -38,6 +39,14 @@ _SCHEMA_STATE: Dict[str, Any] = {
 }
 
 _TEXTUAL_TYPE_HINTS = {"char", "varchar", "text", "citext", "name", "uuid", "character varying"}
+
+
+@dataclass
+class PlanResult:
+    sql: Optional[str]
+    regenerated: bool = False
+    allowed_tables: Optional[List[str]] = None
+    clarification: Optional[str] = None
 
 
 def _column_is_textual(col_type: Any) -> bool:
@@ -140,7 +149,7 @@ def resolver_shortcut(
     if intent in {"count", "list"}:
         if not candidates:
             clarification = {
-                "answer": "I don’t see a matching table for that. Tell me the table (e.g., public.brand) and I’ll run it.",
+                "answer": "I don't see a matching table for that. Tell me the table (e.g., public.brand) and I'll run it.",
                 "meta": {
                     "intent": intent,
                     "reason": "no_candidates",
@@ -165,7 +174,7 @@ def resolver_shortcut(
                     f'{c["schema"]}.{c["table"]}' for c in candidates[:3]
                 )
                 clarification = {
-                    "answer": f"Did you mean one of these tables: {options}? Reply with one and I’ll proceed.",
+                    "answer": f"Did you mean one of these tables: {options}? Reply with one and I'll proceed.",
                     "meta": {
                         "intent": intent,
                         "reason": "ambiguous",
@@ -182,7 +191,7 @@ def resolver_shortcut(
             top_score = float(candidates[0].get("score", 0.0))
             if top_score < 0.40:
                 clarification = {
-                    "answer": "I’m not confident which table matches that. Tell me the table name and I’ll continue.",
+                    "answer": "I'm not confident which table matches that. Tell me the table name and I'll continue.",
                     "meta": {
                         "intent": intent,
                         "reason": "low_confidence",
@@ -431,7 +440,7 @@ def plan_sql(
     extra_system_hint: str | None = None,
     schema_state: Dict[str, Any] | None = None,
     focus_cards: Sequence[Dict[str, Any]] | None = None,
-) -> str:
+) -> PlanResult:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY missing. Set it in .env")
 
@@ -451,33 +460,50 @@ def plan_sql(
         system_prompt += "\n" + extra_system_hint.strip()
 
     client = OpenAI(api_key=settings.openai_api_key)
-    schema_ctx = f"schema_fingerprint={schema_fp}\n{schema_context}".strip()
 
-    user_blocks = [
-        f"Database schema:\n{schema_ctx}",
-        f"Task: {nl_request}",
-    ]
-
+    prompt_schema: Optional[str] = None
     if focus_cards:
-        focus_lines = ["Focus tables (top matches):"]
-        for card in focus_cards[:3]:
+        def _brief(card: Dict[str, Any]) -> str:
             schema = card.get("schema") or ""
             table = card.get("table") or ""
             qualified = f"{schema}.{table}" if schema and table else table or schema
             columns = card.get("columns") or []
-            preview = []
-            for col in columns[:8]:
+            column_bits = []
+            for col in columns[:16]:
                 name = col.get("name")
                 if not name:
                     continue
                 col_type = col.get("type")
-                if col_type:
-                    preview.append(f"{name} ({col_type})")
-                else:
-                    preview.append(str(name))
-            column_text = ", ".join(preview) if preview else "columns unavailable"
-            focus_lines.append(f"- {qualified}: {column_text}")
-        user_blocks.append("\n".join(focus_lines))
+                col_text = f"{name}:{str(col_type).lower()}" if col_type is not None else str(name)
+                column_bits.append(col_text)
+            fks = card.get("fks") or []
+            fk_bits = []
+            for fk in fks[:12]:
+                column = fk.get("column")
+                ref_table = fk.get("ref_table")
+                ref_column = fk.get("ref_column")
+                if column and ref_table and ref_column:
+                    fk_bits.append(f"{column}->{ref_table}.{ref_column}")
+            cols_text = ", ".join(column_bits)
+            fk_text = f" | fks[{', '.join(fk_bits)}]" if fk_bits else ""
+            return f"{qualified} | cols[{cols_text}]" + fk_text
+
+        schema_brief = "\n".join(_brief(card) for card in focus_cards)
+        prompt_schema = (
+            "Use only these tables/columns. Do not invent identifiers.\n"
+            "SCHEMA:\n" + schema_brief
+        )
+        user_blocks = [
+            prompt_schema,
+            f"Task: {nl_request}",
+        ]
+    else:
+        schema_ctx = f"schema_fingerprint={schema_fp}\n{schema_context}".strip()
+        prompt_schema = schema_ctx
+        user_blocks = [
+            f"Database schema:\n{schema_ctx}",
+            f"Task: {nl_request}",
+        ]
 
     # Knowledge retrieval
     knowledge_entries = []
@@ -498,6 +524,32 @@ def plan_sql(
             "Use these named parameters if relevant (do not inline values): "
             + ", ".join(f":{k}" for k in param_hints.keys())
         )
+
+    allowed_table_names: List[str] = []
+    allowed_tables: Set[Tuple[Optional[str], str]] = set()
+    allowed_columns: Set[Tuple[Optional[str], Optional[str], str]] = set()
+    if focus_cards:
+        for card in focus_cards:
+            schema = card.get("schema")
+            table = card.get("table")
+            if not schema or not table:
+                continue
+            allowed_table_names.append(f"{schema}.{table}")
+            allowed_tables.add((schema, table))
+            allowed_tables.add((None, table))
+            allowed_tables.add(("", table))
+            for col in card.get("columns") or []:
+                name = col.get("name")
+                if not name:
+                    continue
+                allowed_columns.add((schema, table, name))
+                allowed_columns.add((None, table, name))
+                allowed_columns.add(("", table, name))
+                allowed_columns.add((None, None, name))
+
+    allowed_table_meta = sorted(set(allowed_table_names)) if allowed_table_names else None
+
+    base_user_blocks = list(user_blocks)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -528,6 +580,94 @@ def plan_sql(
     if not sql:
         raise RuntimeError("Empty SQL after normalization. Aborting.")
 
+    regenerated = False
+
+    if focus_cards:
+        def _table_allowed(entry: Tuple[Optional[str], str]) -> bool:
+            schema, table = entry
+            if (schema, table) in allowed_tables:
+                return True
+            if (None, table) in allowed_tables or ("", table) in allowed_tables:
+                return True
+            return False
+
+        def _column_allowed(entry: Tuple[Optional[str], Optional[str], str]) -> bool:
+            schema, table, name = entry
+            if name == "*":
+                return True
+            if (schema, table, name) in allowed_columns:
+                return True
+            if table and ((None, table, name) in allowed_columns or ("", table, name) in allowed_columns):
+                return True
+            if (None, None, name) in allowed_columns:
+                return True
+            return False
+
+        analysis = analyse_sql(sql)
+        bad_tables = [entry for entry in analysis.tables if not _table_allowed(entry)]
+        bad_columns = [entry for entry in analysis.columns if not _column_allowed(entry)]
+
+        if bad_tables or bad_columns:
+            allowed_names = allowed_table_meta or [
+                f"{card.get('schema')}.{card.get('table')}"
+                for card in focus_cards
+                if card.get("schema") and card.get("table")
+            ]
+            strict_hint = (
+                "Use only these tables: "
+                + ", ".join(sorted(allowed_names))
+                + ". Do not reference anything else."
+            )
+
+            strict_blocks = list(base_user_blocks)
+            strict_blocks.insert(1, strict_hint)
+            strict_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "\n\n".join(strict_blocks)},
+            ]
+
+            try:
+                resp2 = client.chat.completions.create(
+                    model=settings.openai_model,
+                    messages=strict_messages,
+                    temperature=0,
+                    max_tokens=400,
+                )
+            except Exception as e:
+                raise RuntimeError(f"LLM call failed: {e}") from e
+
+            choice2 = resp2.choices[0] if resp2.choices else None
+            content2 = getattr(choice2.message, "content", None) if choice2 else None
+            if not content2 or (isinstance(content2, str) and content2.strip().lower() in ("", "none", "null")):
+                raise RuntimeError("Model returned an empty SQL response after strict hint.")
+            if not isinstance(content2, str):
+                content2 = str(content2)
+            sql2 = _single_statement(_strip_fences(content2))
+            if not sql2:
+                raise RuntimeError("Empty SQL after strict regeneration.")
+
+            analysis2 = analyse_sql(sql2)
+            bad_tables2 = [entry for entry in analysis2.tables if not _table_allowed(entry)]
+            bad_columns2 = [entry for entry in analysis2.columns if not _column_allowed(entry)]
+            if bad_tables2 or bad_columns2:
+                message = "I can't answer without leaving the allowed tables. Specify which tables to use."
+                return PlanResult(
+                    sql=None,
+                    regenerated=True,
+                    allowed_tables=allowed_table_meta,
+                    clarification=message,
+                )
+
+            sql = sql2
+            analysis = analysis2
+            regenerated = True
+
+    if is_select(sql):
+        sql = add_limit(sql, 100)
+    sql = sql.rstrip()
+    if is_select(sql) and not sql.endswith(";"):
+        sql += ";"
+
     if not allow_writes:
         kind = stmt_kind(sql)
         if kind != "SELECT":
@@ -538,7 +678,11 @@ def plan_sql(
             )
 
     console.print(f"[green]Generated SQL:[/]\n{sql}")
-    return sql
+    return PlanResult(
+        sql=sql,
+        regenerated=regenerated,
+        allowed_tables=allowed_table_meta,
+    )
 
 
 def plan_sql_with_retry(
@@ -550,7 +694,7 @@ def plan_sql_with_retry(
     validator: Callable[[str, Dict[str, Any], bool], Any] | None = None,
     extra_system_hint: str | None = None,
     focus_cards: Sequence[Dict[str, Any]] | None = None,
-) -> str:
+) -> PlanResult:
     """Plan SQL with automatic retry on identifier or execution errors."""
 
     original_request = nl_request
@@ -558,8 +702,8 @@ def plan_sql_with_retry(
     identifier_hint = extra_system_hint
     auto_refresh_used = False
 
-    def _plan_once(request_text: str, schema_state: Dict[str, Any]) -> str:
-        sql = plan_sql(
+    def _plan_once(request_text: str, schema_state: Dict[str, Any]) -> PlanResult:
+        plan_result = plan_sql(
             request_text,
             allow_writes,
             force_refresh_schema=False,
@@ -569,8 +713,12 @@ def plan_sql_with_retry(
             focus_cards=focus_cards,
         )
 
+        if plan_result.clarification:
+            return plan_result
+
+        sql_text = plan_result.sql or ""
         raw_params: Dict[str, Any] = dict(param_hints or {})
-        normalized_sql = normalize_limit_literal(sql, raw_params)
+        normalized_sql = normalize_limit_literal(sql_text, raw_params)
         hydrated_params = hydrate_readonly_params(normalized_sql, raw_params)
 
         if validator is not None:
@@ -581,7 +729,14 @@ def plan_sql_with_retry(
         else:
             normalized_sql = _validate_with_guard(normalized_sql, raw_params, allow_writes)
 
-        return normalized_sql
+        if is_select(normalized_sql):
+            normalized_sql = add_limit(normalized_sql, 100)
+        normalized_sql = normalized_sql.rstrip()
+        if is_select(normalized_sql) and not normalized_sql.endswith(";"):
+            normalized_sql += ";"
+
+        plan_result.sql = normalized_sql
+        return plan_result
 
     for attempt in range(max_retries):
         schema_state = get_schema_state(force_refresh_schema if attempt == 0 else False)
@@ -597,7 +752,10 @@ def plan_sql_with_retry(
             console.print(f"[yellow]Retry {attempt + 1}/{max_retries} after error: {last_error}[/]")
 
         try:
-            return _plan_once(current_request, schema_state)
+            result = _plan_once(current_request, schema_state)
+            if result.clarification:
+                return result
+            return result
         except IdentifierValidationError as ide:
             if STRICT_IDENTIFIER_MODE and ide.details.get("strict_violation"):
                 raise
@@ -637,7 +795,10 @@ def plan_sql_with_retry(
                 last_error = None
 
                 try:
-                    return _plan_once(original_request, refreshed_state)
+                    result = _plan_once(original_request, refreshed_state)
+                    if result.clarification:
+                        return result
+                    return result
                 except IdentifierValidationError as refreshed_error:
                     refresh_hint = "Schema was refreshed; identifier remains unknown."
                     hint_text = refreshed_error.hint or ""

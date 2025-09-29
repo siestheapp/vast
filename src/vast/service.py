@@ -423,7 +423,7 @@ def plan_and_execute(
     resolution_meta = {}
     if resolution:
         resolution_meta = resolution.get("meta", {}) or {}
-        catalog_ms = resolution_meta.get("catalog_ms", 0)
+        catalog_ms = resolution_meta.get("catalog_ms_slim", resolution_meta.get("catalog_ms", 0))
         plan_ms = resolution_meta.get("plan_ms", 0)
 
     if shortcut:
@@ -491,9 +491,30 @@ def plan_and_execute(
             if len(focus_cards) >= 3:
                 break
 
+    if focus_cards:
+        focus_tables = [f"{card['schema']}.{card['table']}" for card in focus_cards]
+    elif resolution:
+        message = "I'm not confident which tables to use. Tell me which table(s) to query."
+        meta = {
+            "intent": resolution.get("intent"),
+            "reason": "no_focus_tables",
+            "catalog_ms": catalog_ms,
+            "catalog_ms_slim": catalog_ms,
+            "plan_ms": plan_ms,
+            "engine_ms": 0,
+            "exec_ms": 0,
+            "llm_ms": 0,
+            "total_ms": int((time.perf_counter() - total_start) * 1000),
+        }
+        if debug:
+            _print_debug_timings(meta)
+        outcome = {"answer": message, "meta": meta}
+        outcome["resolver"] = resolution
+        return outcome
+
     llm_start = time.perf_counter()
     if retry:
-        sql = plan_sql_with_retry(
+        plan_result = plan_sql_with_retry(
             nl_request,
             allow_writes=allow_writes,
             force_refresh_schema=refresh_schema,
@@ -503,7 +524,7 @@ def plan_and_execute(
             focus_cards=focus_cards,
         )
     else:
-        sql = plan_sql(
+        plan_result = plan_sql(
             nl_request,
             allow_writes=allow_writes,
             force_refresh_schema=refresh_schema,
@@ -511,6 +532,33 @@ def plan_and_execute(
             focus_cards=focus_cards,
         )
     llm_ms = int((time.perf_counter() - llm_start) * 1000)
+
+    if plan_result.clarification:
+        meta = {
+            "intent": (resolution or {}).get("intent", "unknown"),
+            "catalog_ms": catalog_ms,
+            "catalog_ms_slim": catalog_ms,
+            "plan_ms": plan_ms,
+            "engine_ms": 0,
+            "exec_ms": 0,
+            "llm_ms": llm_ms,
+            "total_ms": int((time.perf_counter() - total_start) * 1000),
+            "regenerated": plan_result.regenerated,
+            "allowed_tables": plan_result.allowed_tables,
+        }
+        if debug:
+            _print_debug_timings(meta)
+        outcome = {"answer": plan_result.clarification, "meta": meta}
+        if resolution:
+            outcome["resolver"] = resolution
+        return outcome
+
+    sql = plan_result.sql or ""
+
+    if debug:
+        print(f"debug regenerated={plan_result.regenerated}")
+        if plan_result.allowed_tables:
+            print(f"debug allowed_tables={plan_result.allowed_tables}")
 
     param_hints = _apply_limit_hint(sql, nl_request, param_hints)
     execution = execute_sql(sql, params=param_hints, allow_writes=allow_writes, force_write=force_write)
@@ -529,6 +577,8 @@ def plan_and_execute(
         "exec_ms": exec_ms,
         "llm_ms": llm_ms,
         "total_ms": total_ms,
+        "regenerated": plan_result.regenerated,
+        "allowed_tables": plan_result.allowed_tables,
     }
 
     if debug:

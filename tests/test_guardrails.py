@@ -7,8 +7,8 @@ def test_single_statement_enforced():
         analyse_sql("SELECT 1; SELECT 2")
 
 def test_classifies_with_update_cte():
-    t, _ = analyse_sql("WITH x AS (SELECT 1) UPDATE films SET title = title")
-    assert t is StatementType.WRITE
+    analysis = analyse_sql("WITH x AS (SELECT 1) UPDATE films SET title = title")
+    assert analysis.statement_type is StatementType.WRITE
 
 def test_blocks_ddl():
     with pytest.raises(ValueError):

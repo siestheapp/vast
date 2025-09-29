@@ -26,7 +26,7 @@ from .config import settings
 from .db import get_engine, safe_execute
 from sqlalchemy import text
 from .introspect import list_tables, table_columns, schema_fingerprint
-from .agent import load_or_build_schema_summary, plan_sql
+from .agent import load_or_build_schema_summary, plan_sql, PlanResult
 from .system_ops import SystemOperations
 from . import service
 from .knowledge import get_knowledge_store
@@ -607,12 +607,17 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
         )
         try:
             console.print("[yellow]Attempting to repair SQL with planner hint...[/]")
-            return plan_sql(
+            result = plan_sql(
                 prompt,
                 allow_writes=allow_writes,
                 force_refresh_schema=True,
                 extra_system_hint=hint,
             )
+            if isinstance(result, PlanResult):
+                if result.clarification or not result.sql:
+                    return None
+                return result.sql
+            return result
         except Exception as exc:
             console.print(f"[red]Identifier replan failed: {exc}[/]")
             return None

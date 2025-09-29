@@ -51,8 +51,8 @@ def test_refresh_on_guard_failure_succeeds(monkeypatch):
         assert schema_state is not None, "schema_state should be provided"
         plan_fingerprints.append(schema_state["schema_fingerprint"])
         if schema_state["schema_fingerprint"] == "old-fp":
-            return "SELECT title FROM public.film"
-        return "SELECT name FROM public.film"
+            return agent.PlanResult(sql="SELECT title FROM public.film")
+        return agent.PlanResult(sql="SELECT name FROM public.film")
 
     def fake_validate(sql, params, allow_writes):
         if "title" in sql:
@@ -64,9 +64,10 @@ def test_refresh_on_guard_failure_succeeds(monkeypatch):
     monkeypatch.setattr(agent, "plan_sql", fake_plan_sql)
     monkeypatch.setattr("src.vast.agent._validate_with_guard", fake_validate, raising=False)
 
-    sql = plan_sql_with_retry("find film name")
+    result = plan_sql_with_retry("find film name")
 
-    assert sql == "SELECT name FROM public.film"
+    assert isinstance(result, agent.PlanResult)
+    assert result.sql == "SELECT name FROM public.film"
     assert refresh_calls == ["refresh"]
     assert plan_fingerprints == ["old-fp", "new-fp"], "planner should re-run with refreshed fingerprint"
     assert agent.get_schema_state()["schema_fingerprint"] == "new-fp"
@@ -98,7 +99,7 @@ def test_no_infinite_retry(monkeypatch):
         schema_state=None,
     ):
         plan_invocations.append(schema_state["schema_fingerprint"])
-        return "SELECT ghost FROM public.film"
+        return agent.PlanResult(sql="SELECT ghost FROM public.film")
 
     def always_invalid(sql, params, allow_writes):
         raise _make_identifier_error("Unknown column ghost")
@@ -139,13 +140,14 @@ def test_fingerprint_propagates_to_prompt(monkeypatch):
         "schema_fingerprint": "abc123",
     }
 
-    sql = plan_sql(
+    result = plan_sql(
         "list films",
         param_hints={"limit": 5},
         schema_state=state,
     )
 
-    assert sql == "SELECT 1"
+    assert isinstance(result, agent.PlanResult)
+    assert result.sql == "SELECT 1"
     message_content = captured["messages"][1]["content"]
     assert "schema_fingerprint=abc123" in message_content
 
@@ -173,7 +175,7 @@ def test_refresh_failure_does_not_corrupt_cache(monkeypatch):
         extra_system_hint=None,
         schema_state=None,
     ):
-        return "SELECT title FROM public.film"
+        return agent.PlanResult(sql="SELECT title FROM public.film")
 
     monkeypatch.setattr(agent, "get_schema_state", fake_get_schema_state)
     monkeypatch.setattr(agent, "refresh_schema_summary", fake_refresh_schema_summary)

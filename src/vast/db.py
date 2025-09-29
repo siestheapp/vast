@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Set
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlglot import parse
+from sqlglot import parse, parse_one
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
@@ -21,6 +22,15 @@ class StatementType(Enum):
 
 _engine_ro: Engine | None = None
 _engine_rw: Engine | None = None
+
+
+@dataclass
+class SQLAnalysis:
+    statement_type: StatementType
+    normalized_sql: str
+    tables: Set[Tuple[Optional[str], str]]
+    columns: Set[Tuple[Optional[str], Optional[str], str]]
+    is_select: bool
 
 
 def _mk_engine(url: str) -> Engine:
@@ -111,7 +121,7 @@ def _classify_statement(expr: exp.Expression) -> StatementType:
     return StatementType.DDL
 
 
-def analyse_sql(sql: str) -> tuple[StatementType, str]:
+def analyse_sql(sql: str) -> SQLAnalysis:
     try:
         expressions = parse(sql, read="postgres")
     except ParseError as exc:
@@ -125,7 +135,60 @@ def analyse_sql(sql: str) -> tuple[StatementType, str]:
     expr = expressions[0]
     classification = _classify_statement(expr)
     normalized = expr.sql(dialect="postgres")
-    return classification, normalized
+
+    try:
+        root = parse_one(sql, read="postgres")
+    except ParseError:
+        root = expr
+
+    alias_map: dict[str, Tuple[Optional[str], str]] = {}
+    tables: Set[Tuple[Optional[str], str]] = set()
+    columns: Set[Tuple[Optional[str], Optional[str], str]] = set()
+
+    for table_expr in root.find_all(exp.Table):
+        table_name = table_expr.name
+        if not table_name:
+            continue
+        schema_name = table_expr.db or None
+        tables.add((schema_name, table_name))
+        tables.add((None, table_name))
+        alias = table_expr.alias
+        if alias and alias.this:
+            alias_name = alias.this.name
+            if alias_name:
+                alias_map[alias_name] = (schema_name, table_name)
+
+    for column_expr in root.find_all(exp.Column):
+        column_name = column_expr.name
+        if not column_name:
+            continue
+        table_ref = column_expr.table
+        schema_ref: Optional[str] = None
+        table_resolved: Optional[str] = None
+        if table_ref:
+            mapping = alias_map.get(table_ref)
+            if mapping:
+                schema_ref, table_resolved = mapping
+            else:
+                table_resolved = table_ref
+        columns.add((schema_ref, table_resolved, column_name))
+        if table_resolved:
+            columns.add((None, table_resolved, column_name))
+        else:
+            columns.add((None, None, column_name))
+
+    target = expr
+    while isinstance(target, exp.With):
+        target = target.this
+    is_select_stmt = isinstance(target, (exp.Select, exp.SetOperation))
+
+    return SQLAnalysis(
+        statement_type=classification,
+        normalized_sql=normalized,
+        tables=tables,
+        columns=columns,
+        is_select=is_select_stmt,
+    )
 
 
 def _estimate_write_rows(sql: str, params: dict | None) -> Optional[int]:
@@ -160,7 +223,9 @@ def safe_execute(
     - For writes, run EXPLAIN gate and block if estimate exceeds max_write_rows.
     - Reads use RO engine; actual write execution uses RW engine.
     """
-    stmt_type, normalized_sql = analyse_sql(sql)
+    analysis = analyse_sql(sql)
+    stmt_type = analysis.statement_type
+    normalized_sql = analysis.normalized_sql
 
     if stmt_type is StatementType.DDL:
         raise ValueError("DDL statements are blocked. Use a migration workflow.")
@@ -213,3 +278,24 @@ def safe_execute(
             "error": str(exc),
         })
         raise
+
+
+def is_select(sql: str) -> bool:
+    analysis = analyse_sql(sql)
+    return analysis.is_select
+
+
+def add_limit(sql: str, limit: int) -> str:
+    try:
+        expr = parse_one(sql, read="postgres")
+    except ParseError:
+        return sql
+
+    target = expr
+    while isinstance(target, exp.With):
+        target = target.this
+
+    if isinstance(target, (exp.Select, exp.SetOperation)) and not target.args.get("limit"):
+        target.set("limit", exp.Limit(this=exp.Literal.number(limit)))
+        return expr.sql(dialect="postgres")
+    return sql

@@ -13,6 +13,7 @@ const lastConnected = $('#lastConnected');
 const lastResponse = $('#lastResponse');
 const envLabel = $('#envLabel');
 let typingBubble = null;
+let lastConnLabel = null; // Preserve last known friendly DB label
 
 const setStatus = (variant, message) => {
   const node = $('#healthStatus');
@@ -246,21 +247,28 @@ async function fetchHealthFull() {
   try {
     const response = await fetch(`${base.replace(/\/$/, '')}/health/full`, { cache: 'no-store' });
     const payload = await response.json();
-    const ok = !!(payload && payload.db_ok);
+    const apiOk = !!(payload && payload.api_ok);
+    const dbOk = !!(payload && payload.db_ok);
     const db = (payload && payload.db) || {};
 
     const pill = document.getElementById('healthStatus');
     const banner = document.getElementById('dbBanner');
     if (!pill || !banner) console.warn('Missing #healthStatus or #dbBanner');
 
-    const friendly = db.project_name || db.project_ref || db.database || 'Unknown';
-    pill.classList.toggle('status-ok', ok);
-    pill.classList.toggle('status-bad', !ok);
-    pill.textContent = ok ? 'CONNECTED · DEV' : 'DISCONNECTED';
-    pill.title = ok ? `${db.user || ''}@${db.host || ''}/${db.database || ''}` : (payload && payload.error ? String(payload.error) : '');
+    // Pill reflects API transport health only
+    pill.classList.toggle('status-ok', apiOk);
+    pill.classList.toggle('status-bad', !apiOk);
+    pill.textContent = apiOk ? 'CONNECTED · DEV' : 'DISCONNECTED';
+    pill.title = apiOk ? `${db.user || ''}@${db.host || ''}/${db.database || ''}` : (payload && payload.error ? String(payload.error) : '');
 
-    banner.textContent = ok ? `Connected to: ${friendly}` : 'Connected to: Unknown (health failed)';
-    banner.title = ok ? `${db.user || 'unknown'}@${db.host || 'unknown'}/${db.database || 'unknown'}` : (payload && payload.error ? String(payload.error) : '');
+    const friendlyNow = db.project_name || db.project_ref || db.database || null;
+    if (friendlyNow) {
+      lastConnLabel = friendlyNow;
+    }
+    const dbSub = dbOk ? 'DB: OK' : 'DB: unstable';
+    const label = lastConnLabel || friendlyNow || 'Unknown';
+    banner.textContent = `Connected to: ${label} • ${dbSub}`;
+    banner.title = apiOk ? `${db.user || 'unknown'}@${db.host || 'unknown'}/${db.database || 'unknown'}` : (payload && payload.error ? String(payload.error) : '');
   } catch (error) {
     const pill = document.getElementById('healthStatus');
     const banner = document.getElementById('dbBanner');
@@ -270,7 +278,8 @@ async function fetchHealthFull() {
     pill.classList.toggle('status-bad', true);
     pill.textContent = 'DISCONNECTED';
     pill.title = error && error.message ? error.message : '';
-    banner.textContent = 'Connected to: Unknown (health failed)';
+    const label = lastConnLabel || 'Unknown';
+    banner.textContent = `Connected to: ${label} • DB: unstable`;
     banner.title = error && error.message ? error.message : '';
     console.error(error);
   }
@@ -278,6 +287,8 @@ async function fetchHealthFull() {
 
 document.getElementById('checkHealth').addEventListener('click', fetchHealthFull);
 window.addEventListener('DOMContentLoaded', fetchHealthFull);
+// Debounce health polling: refresh every ~20s
+setInterval(fetchHealthFull, 20000);
 
 $('#askSubmit').addEventListener('click', async () => {
   const output = $('#askResult');

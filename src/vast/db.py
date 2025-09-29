@@ -177,11 +177,21 @@ def analyze_sql(sql: str) -> SQLAnalysis:
         schema_name = table_expr.db or None
         tables.add((schema_name, table_name))
         tables.add((None, table_name))
-        alias = table_expr.alias
-        if alias and alias.this:
-            alias_name = alias.this.name
-            if alias_name:
-                alias_map[alias_name] = (schema_name, table_name)
+        # Alias compatibility across sqlglot versions: may be a string or an expression
+        alias_value = getattr(table_expr, "alias", None)
+        alias_name = None
+        if isinstance(alias_value, str):
+            alias_name = alias_value
+        elif alias_value is not None:
+            # Prefer direct .name if present; otherwise try .this.name
+            name_attr = getattr(alias_value, "name", None)
+            if isinstance(name_attr, str) and name_attr:
+                alias_name = name_attr
+            else:
+                alias_this = getattr(alias_value, "this", None)
+                alias_name = getattr(alias_this, "name", None)
+        if alias_name:
+            alias_map[alias_name] = (schema_name, table_name)
 
     for column_expr in root.find_all(exp.Column):
         column_name = column_expr.name

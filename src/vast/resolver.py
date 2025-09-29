@@ -29,7 +29,7 @@ RELATIONAL_TOKENS = {
     "ranked",
 }
 _LATEST_PER_GROUP_RE = re.compile(
-    r"\b(latest|most\s+recent|top)\s+(?P<n>\d+)?\s*(?P<item>[a-z0-9_ ]+?)\s+(per|by)\s+(?P<group>[a-z0-9_ ]+)\b",
+    r"\b(latest|most\s+recent|top)\s+(?P<n>\d+)?\s*(?P<item>[a-z0-9_ ]+?)\s+(?:per|by|for\s+each|for\s+every|each)\s+(?P<group>[a-z0-9_ ]+)\b",
     re.IGNORECASE,
 )
 _ALIAS_WEIGHT = 0.6
@@ -151,7 +151,8 @@ def detect_latest_per_group(utterance: str) -> Optional[Dict[str, Any]]:
     # Extract limit
     n = m.groupdict().get("n")
     try:
-        limit = int(n) if n else 5
+        # Default to 1 when no explicit number is provided ("for each" case)
+        limit = int(n) if n else 1
     except Exception:
         limit = 5
     limit = max(1, min(1000, limit))

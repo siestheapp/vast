@@ -33,6 +33,21 @@ class SQLAnalysis:
     is_select: bool
 
 
+# Compatibility tuple for sqlglot set operations across versions
+# Some versions expose a common SetOperation base; others only provide
+# concrete nodes like Union/Except/Intersect.
+SET_OPERATION_TYPES = tuple(
+    t
+    for t in (
+        getattr(exp, "Union", None),
+        getattr(exp, "Except", None),
+        getattr(exp, "Intersect", None),
+        getattr(exp, "SetOperation", None),
+    )
+    if t is not None
+)
+
+
 def _mk_engine(url: str) -> Engine:
     return create_engine(
         url,
@@ -92,7 +107,12 @@ def _command_name(command: exp.Command) -> str:
 def _classify_statement(expr: exp.Expression) -> StatementType:
     expr = _unwrap_with(expr)
 
-    ddl_nodes = (exp.Create, exp.AlterTable, exp.Drop, exp.TruncateTable)
+    # DDL nodes across sqlglot versions (AlterTable -> Alter; TruncateTable -> Truncate)
+    ddl_create = getattr(exp, "Create", None)
+    ddl_alter = getattr(exp, "AlterTable", None) or getattr(exp, "Alter", None)
+    ddl_drop = getattr(exp, "Drop", None)
+    ddl_truncate = getattr(exp, "TruncateTable", None) or getattr(exp, "Truncate", None)
+    ddl_nodes = tuple(t for t in (ddl_create, ddl_alter, ddl_drop, ddl_truncate) if t is not None)
     if isinstance(expr, ddl_nodes) or any(expr.find(node) for node in ddl_nodes):
         return StatementType.DDL
 
@@ -114,14 +134,19 @@ def _classify_statement(expr: exp.Expression) -> StatementType:
     if expr.find(exp.Insert) or expr.find(exp.Update) or expr.find(exp.Delete) or expr.find(exp.Merge):
         return StatementType.WRITE
 
-    if expr.find(exp.Create) or expr.find(exp.Drop) or expr.find(exp.AlterTable) or expr.find(exp.TruncateTable):
+    if (
+        (ddl_create and expr.find(ddl_create))
+        or (ddl_drop and expr.find(ddl_drop))
+        or (ddl_alter and expr.find(ddl_alter))
+        or (ddl_truncate and expr.find(ddl_truncate))
+    ):
         return StatementType.DDL
 
     # Fail closed for unknown statements.
     return StatementType.DDL
 
 
-def analyse_sql(sql: str) -> SQLAnalysis:
+def analyze_sql(sql: str) -> SQLAnalysis:
     try:
         expressions = parse(sql, read="postgres")
     except ParseError as exc:
@@ -180,7 +205,7 @@ def analyse_sql(sql: str) -> SQLAnalysis:
     target = expr
     while isinstance(target, exp.With):
         target = target.this
-    is_select_stmt = isinstance(target, (exp.Select, exp.SetOperation))
+    is_select_stmt = isinstance(target, (exp.Select, *SET_OPERATION_TYPES))
 
     return SQLAnalysis(
         statement_type=classification,
@@ -189,6 +214,11 @@ def analyse_sql(sql: str) -> SQLAnalysis:
         columns=columns,
         is_select=is_select_stmt,
     )
+
+
+def analyse_sql(sql: str) -> SQLAnalysis:  # noqa: D401
+    """British alias for analyze_sql."""
+    return analyze_sql(sql)
 
 
 def _estimate_write_rows(sql: str, params: dict | None) -> Optional[int]:
@@ -223,7 +253,7 @@ def safe_execute(
     - For writes, run EXPLAIN gate and block if estimate exceeds max_write_rows.
     - Reads use RO engine; actual write execution uses RW engine.
     """
-    analysis = analyse_sql(sql)
+    analysis = analyze_sql(sql)
     stmt_type = analysis.statement_type
     normalized_sql = analysis.normalized_sql
 
@@ -281,7 +311,7 @@ def safe_execute(
 
 
 def is_select(sql: str) -> bool:
-    analysis = analyse_sql(sql)
+    analysis = analyze_sql(sql)
     return analysis.is_select
 
 
@@ -295,7 +325,7 @@ def add_limit(sql: str, limit: int) -> str:
     while isinstance(target, exp.With):
         target = target.this
 
-    if isinstance(target, (exp.Select, exp.SetOperation)) and not target.args.get("limit"):
+    if isinstance(target, (exp.Select, *SET_OPERATION_TYPES)) and not target.args.get("limit"):
         target.set("limit", exp.Limit(this=exp.Literal.number(limit)))
         return expr.sql(dialect="postgres")
     return sql

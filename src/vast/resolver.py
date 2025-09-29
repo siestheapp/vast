@@ -13,6 +13,25 @@ from .db import get_ro_engine
 
 _TEXT_TYPES = {"char", "varchar", "text", "citext", "name", "uuid"}
 PREFERRED_LIST_COLUMNS = ["username", "email", "name", "slug", "title"]
+RELATIONAL_TOKENS = {
+    "per",
+    "by",
+    "group",
+    "grouped",
+    "each",
+    "for each",
+    "for every",
+    "join",
+    "partition",
+    "latest",
+    "most recent",
+    "top",
+    "ranked",
+}
+_LATEST_PER_GROUP_RE = re.compile(
+    r"\b(latest|most\s+recent|top)\s+(?P<n>\d+)?\s*(?P<item>[a-z0-9_ ]+?)\s+(per|by)\s+(?P<group>[a-z0-9_ ]+)\b",
+    re.IGNORECASE,
+)
 _ALIAS_WEIGHT = 0.6
 _TABLE_WEIGHT = 0.3
 _COLUMN_WEIGHT = 0.1
@@ -23,6 +42,19 @@ _INTENT_PATTERNS = {
     "count": re.compile(r"\b(count|how\s+many)\b", re.IGNORECASE),
     "list": re.compile(r"\b(list|show|give\s+me)\b", re.IGNORECASE),
 }
+
+
+def is_relational_list_query(utterance: str) -> bool:
+    u = (utterance or "").lower()
+    if any(tok in u for tok in RELATIONAL_TOKENS):
+        return True
+    if re.search(r"\b(top|latest|most recent)\s+\d+\b", u):
+        return True
+    if re.search(r"\b\d+\s+(per|by)\s+[a-z0-9_]+\b", u):
+        return True
+    if re.search(r"\b[a-z0-9_]+\s+per\s+[a-z0-9_]+\b", u):
+        return True
+    return False
 
 
 def resolve_entities(utterance: str, tables_index: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -52,26 +84,97 @@ def resolve_entities(utterance: str, tables_index: Sequence[Dict[str, Any]]) -> 
         else:
             tables_scope = []
 
+    # Try specialized latest-per-group detector first (Step 1)
+    latest_payload = detect_latest_per_group(utterance)
+
     candidates = _score_candidates(tokens, token_string, tables_scope)
 
     column_hints: List[str] = []
     if intent == "list" and candidates:
         column_hints = _column_hints(candidates[0].get("columns") or [])
 
+    top_candidates = [
+        {
+            "schema": c["schema"],
+            "table": c["table"],
+            "score": c["score"],
+            "key": c["key"],
+            "columns": c.get("columns", []),
+            "aliases": c.get("aliases", []),
+        }
+        for c in candidates[:_TOP_K]
+    ]
+
+    if latest_payload:
+        latest_payload = dict(latest_payload)
+        latest_payload.update({
+            "candidates": top_candidates,
+            "column_hints": column_hints,
+        })
+        return latest_payload
+
+    if intent == "list" and is_relational_list_query(utterance):
+        return {
+            "intent": intent,
+            "needs_llm": True,
+            "reason": "relational_list",
+            "candidates": top_candidates,
+            "column_hints": column_hints,
+        }
+
     return {
         "intent": intent,
-        "candidates": [
-            {
-                "schema": c["schema"],
-                "table": c["table"],
-                "score": c["score"],
-                "key": c["key"],
-                "columns": c.get("columns", []),
-                "aliases": c.get("aliases", []),
-            }
-            for c in candidates[:_TOP_K]
-        ],
+        "candidates": top_candidates,
         "column_hints": column_hints,
+    }
+
+
+def detect_latest_per_group(utterance: str) -> Optional[Dict[str, Any]]:
+    """Detect requests like "latest 5 product urls per brand".
+
+    Returns a minimal payload when detected:
+    {
+      "intent": "latest_per_group",
+      "limit_per_group": 5,
+      "group_by": "brand",
+      "item_noun": "product urls"
+    }
+    """
+    text = (utterance or "").strip()
+    if not text:
+        return None
+
+    m = _LATEST_PER_GROUP_RE.search(text)
+    if not m:
+        return None
+
+    # Extract limit
+    n = m.groupdict().get("n")
+    try:
+        limit = int(n) if n else 5
+    except Exception:
+        limit = 5
+    limit = max(1, min(1000, limit))
+
+    item = (m.groupdict().get("item") or "").strip().lower()
+    group = (m.groupdict().get("group") or "").strip().lower()
+
+    # Normalize common aliases we care about for MVP
+    if "product" in item and "url" in item:
+        item = "product urls"
+    if group in {"brands", "brand"}:
+        group = "brand"
+
+    # Provide fields expected by agent shortcut as well
+    normalized_group = (group or "brand").strip()
+    normalized_item = (item or "product urls").strip()
+    return {
+        "intent": "latest_per_group",
+        "limit_per_group": limit,
+        "group_by": normalized_group,
+        "item_noun": normalized_item,
+        "group_noun": normalized_group,
+        "k": limit,
     }
 
 
@@ -301,7 +404,48 @@ def _quote_column(engine: Engine, column: str) -> str:
 
 __all__ = [
     "resolve_entities",
+    "detect_latest_per_group",
     "run_template_count",
     "run_template_list",
     "PREFERRED_LIST_COLUMNS",
 ]
+
+
+def run_template_latest_per_brand(limit_per_group: int = 5) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Deterministic latest-N-per-brand using product_url→style→brand join.
+
+    Returns rows with columns: brand, url, seen_at.
+    """
+    engine_start = time.perf_counter()
+    engine = get_ro_engine()
+    engine_ms = int((time.perf_counter() - engine_start) * 1000)
+
+    query = text(
+        """
+        WITH ranked AS (
+          SELECT b.name AS brand,
+                 pu.url,
+                 pu.seen_at,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY b.id
+                   ORDER BY pu.seen_at DESC
+                 ) AS rn
+          FROM public.product_url pu
+          JOIN public.style s ON pu.style_id = s.id
+          JOIN public.brand b ON s.brand_id = b.id
+          WHERE pu.is_current = true
+        )
+        SELECT brand, url, seen_at
+        FROM ranked
+        WHERE rn <= :limit
+        ORDER BY brand, seen_at DESC
+        """
+    )
+
+    with engine.begin() as conn:
+        conn.execute(text(f"SET LOCAL statement_timeout = '{_TIMEOUT_MS}ms'"))
+        exec_start = time.perf_counter()
+        result = conn.execute(query, {"limit": int(max(1, limit_per_group))}).mappings().all()
+        exec_ms = int((time.perf_counter() - exec_start) * 1000)
+
+    return [dict(row) for row in result], {"engine_ms": engine_ms, "exec_ms": exec_ms}

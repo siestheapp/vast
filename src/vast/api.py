@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from . import service
 from .identifier_guard import IdentifierValidationError, format_identifier_error
-from .conversation import VastConversation
 from api.routers import health as health_router
 from collections.abc import Mapping
 from datetime import datetime
@@ -119,7 +118,8 @@ class RepoWriteRequest(BaseModel):
 def create_app() -> FastAPI:
     app = FastAPI(title="Vast1 API", version="0.1.0")
     app.include_router(health_router.router)
-    conversations: Dict[str, VastConversation] = {}
+    # Lazy import VastConversation to speed up API startup/healthcheck
+    conversations: Dict[str, Any] = {}
 
     @app.get("/health")
     def health() -> Dict[str, Any]:
@@ -198,6 +198,8 @@ def create_app() -> FastAPI:
     @app.post("/conversations/process")
     def process_conversation(payload: ConversationProcessRequest) -> Dict[str, Any]:
         # Reuse or create a conversation instance for the session
+        # Import here to avoid heavy module import during app startup
+        from .conversation import VastConversation
         sess = payload.session or "desktop"
         if sess not in conversations:
             conversations[sess] = VastConversation(sess)

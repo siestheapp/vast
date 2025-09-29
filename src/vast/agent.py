@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Callable, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from openai import OpenAI
 from rich.console import Console
@@ -14,8 +14,13 @@ from .config import settings
 from .introspect import list_tables, table_columns
 from .db import safe_execute, get_engine
 from .knowledge import get_knowledge_store
-from .catalog_pg import get_cached_cards
-from .resolver import resolve_entities, run_template_count, run_template_list
+from .catalog_pg import load_schema_index_slim
+from .resolver import (
+    PREFERRED_LIST_COLUMNS,
+    resolve_entities,
+    run_template_count,
+    run_template_list,
+)
 from .identifier_guard import (
     ensure_valid_identifiers,
     IdentifierValidationError,
@@ -32,6 +37,45 @@ _SCHEMA_STATE: Dict[str, Any] = {
     "schema_fingerprint": None,
 }
 
+_TEXTUAL_TYPE_HINTS = {"char", "varchar", "text", "citext", "name", "uuid", "character varying"}
+
+
+def _column_is_textual(col_type: Any) -> bool:
+    if col_type is None:
+        return False
+    if isinstance(col_type, str):
+        lowered = col_type.lower()
+        return any(token in lowered for token in _TEXTUAL_TYPE_HINTS)
+    try:
+        python_type = getattr(col_type, "python_type", None)
+        if python_type is str:
+            return True
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return False
+
+
+def _select_list_column(columns: Sequence[Dict[str, Any]]) -> Optional[str]:
+    name_map: Dict[str, Dict[str, Any]] = {}
+    for col in columns:
+        name = col.get("name")
+        if not name:
+            continue
+        name_map[name.lower()] = col
+
+    for preferred in PREFERRED_LIST_COLUMNS:
+        col = name_map.get(preferred)
+        if col and _column_is_textual(col.get("type")):
+            return str(col.get("name"))
+
+    for col in columns:
+        if not col.get("name"):
+            continue
+        if _column_is_textual(col.get("type")):
+            return str(col.get("name"))
+
+    return None
+
 BASE_RULES = """You are Vast1, an AI database operator.
 
 Rules:
@@ -46,31 +90,33 @@ Rules:
 
 def resolver_shortcut(
     nl_request: str,
-    cards: Dict[str, Dict[str, Any]] | None = None,
+    index_tables: Sequence[Dict[str, Any]] | None = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any] | None]:
     """Run the deterministic resolver and return an optional shortcut result."""
 
     catalog_ms = 0
-    if cards is not None:
-        catalog = cards
+    if index_tables is not None:
+        tables = list(index_tables)
     else:
         catalog_start = time.perf_counter()
         try:
-            catalog = get_cached_cards()
+            slim_index = load_schema_index_slim()
+            tables = slim_index.get("tables") or []
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Failed to load schema cards for resolver: %s", exc)
-            catalog = {}
+            logger.debug("Failed to load slim schema index: %s", exc)
+            tables = []
         catalog_ms = int((time.perf_counter() - catalog_start) * 1000)
 
     plan_start = time.perf_counter()
     try:
-        resolution = resolve_entities(nl_request or "", catalog or {})
+        resolution = resolve_entities(nl_request or "", tables)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Resolver failed for request %r: %s", nl_request, exc)
         resolution = {"intent": "unknown", "candidates": []}
     plan_ms = int((time.perf_counter() - plan_start) * 1000)
 
     meta = dict(resolution.get("meta") or {})
+    meta["catalog_ms_slim"] = catalog_ms
     meta["catalog_ms"] = catalog_ms
     meta["plan_ms"] = plan_ms
     resolution["meta"] = meta
@@ -81,9 +127,11 @@ def resolver_shortcut(
         if not candidates:
             return False
         if len(candidates) == 1:
-            return True
+            return candidates[0].get("score", 0.0) >= 0.40
         try:
-            return float(candidates[0]["score"]) - float(candidates[1]["score"]) >= 0.15
+            top_score = float(candidates[0]["score"])
+            next_score = float(candidates[1]["score"])
+            return top_score >= 0.40 and (top_score - next_score) >= 0.15
         except Exception:  # pragma: no cover - defensive
             return False
 
@@ -97,6 +145,7 @@ def resolver_shortcut(
                     "intent": intent,
                     "reason": "no_candidates",
                     "catalog_ms": catalog_ms,
+                    "catalog_ms_slim": catalog_ms,
                     "plan_ms": plan_ms,
                     "engine_ms": 0,
                     "exec_ms": 0,
@@ -110,7 +159,8 @@ def resolver_shortcut(
                 margin = float(candidates[0]["score"]) - float(candidates[1]["score"])
             except Exception:  # pragma: no cover - defensive
                 margin = 0.0
-            if margin < 0.15:
+            top_score = float(candidates[0].get("score", 0.0))
+            if margin < 0.15 or top_score < 0.40:
                 options = ", ".join(
                     f'{c["schema"]}.{c["table"]}' for c in candidates[:3]
                 )
@@ -120,6 +170,24 @@ def resolver_shortcut(
                         "intent": intent,
                         "reason": "ambiguous",
                         "catalog_ms": catalog_ms,
+                        "catalog_ms_slim": catalog_ms,
+                        "plan_ms": plan_ms,
+                        "engine_ms": 0,
+                        "exec_ms": 0,
+                        "llm_ms": 0,
+                    },
+                }
+                return resolution, clarification
+        elif candidates:
+            top_score = float(candidates[0].get("score", 0.0))
+            if top_score < 0.40:
+                clarification = {
+                    "answer": "I’m not confident which table matches that. Tell me the table name and I’ll continue.",
+                    "meta": {
+                        "intent": intent,
+                        "reason": "low_confidence",
+                        "catalog_ms": catalog_ms,
+                        "catalog_ms_slim": catalog_ms,
                         "plan_ms": plan_ms,
                         "engine_ms": 0,
                         "exec_ms": 0,
@@ -139,6 +207,7 @@ def resolver_shortcut(
             "meta": {
                 "intent": "count",
                 "catalog_ms": catalog_ms,
+                "catalog_ms_slim": catalog_ms,
                 "plan_ms": plan_ms,
                 "engine_ms": engine_ms,
                 "exec_ms": exec_ms,
@@ -163,12 +232,7 @@ def resolver_shortcut(
         column_name = column_hints[0] if column_hints else None
 
         if not column_name:
-            card = catalog.get(f'{top["schema"]}.{top["table"]}', {})
-            for column in card.get("columns") or []:
-                col_type = str(column.get("type") or "").lower()
-                if col_type in {"text", "varchar", "character varying"} and column.get("name"):
-                    column_name = column["name"]
-                    break
+            column_name = _select_list_column(top.get("columns") or [])
 
         if column_name:
             rows, timing = run_template_list(top["schema"], top["table"], column_name, limit=50)
@@ -180,6 +244,7 @@ def resolver_shortcut(
                 "meta": {
                     "intent": "list",
                     "catalog_ms": catalog_ms,
+                    "catalog_ms_slim": catalog_ms,
                     "plan_ms": plan_ms,
                     "engine_ms": engine_ms,
                     "exec_ms": exec_ms,
@@ -365,6 +430,7 @@ def plan_sql(
     param_hints: Dict[str, Any] | None = None,
     extra_system_hint: str | None = None,
     schema_state: Dict[str, Any] | None = None,
+    focus_cards: Sequence[Dict[str, Any]] | None = None,
 ) -> str:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY missing. Set it in .env")
@@ -391,6 +457,27 @@ def plan_sql(
         f"Database schema:\n{schema_ctx}",
         f"Task: {nl_request}",
     ]
+
+    if focus_cards:
+        focus_lines = ["Focus tables (top matches):"]
+        for card in focus_cards[:3]:
+            schema = card.get("schema") or ""
+            table = card.get("table") or ""
+            qualified = f"{schema}.{table}" if schema and table else table or schema
+            columns = card.get("columns") or []
+            preview = []
+            for col in columns[:8]:
+                name = col.get("name")
+                if not name:
+                    continue
+                col_type = col.get("type")
+                if col_type:
+                    preview.append(f"{name} ({col_type})")
+                else:
+                    preview.append(str(name))
+            column_text = ", ".join(preview) if preview else "columns unavailable"
+            focus_lines.append(f"- {qualified}: {column_text}")
+        user_blocks.append("\n".join(focus_lines))
 
     # Knowledge retrieval
     knowledge_entries = []
@@ -462,6 +549,7 @@ def plan_sql_with_retry(
     max_retries: int = 2,
     validator: Callable[[str, Dict[str, Any], bool], Any] | None = None,
     extra_system_hint: str | None = None,
+    focus_cards: Sequence[Dict[str, Any]] | None = None,
 ) -> str:
     """Plan SQL with automatic retry on identifier or execution errors."""
 
@@ -478,6 +566,7 @@ def plan_sql_with_retry(
             param_hints=param_hints,
             extra_system_hint=identifier_hint,
             schema_state=schema_state,
+            focus_cards=focus_cards,
         )
 
         raw_params: Dict[str, Any] = dict(param_hints or {})

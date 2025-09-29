@@ -111,7 +111,7 @@ WITH ranked AS (
     pu."seen_at"  AS seen_at,
     ROW_NUMBER() OVER (
       PARTITION BY s."brand_id"
-      ORDER BY pu."seen_at" DESC
+      ORDER BY pu."seen_at" DESC, pu."url"
     ) AS rn
   FROM "public"."product_url" pu
   JOIN "public"."style" s  ON pu."style_id" = s."id"
@@ -121,7 +121,7 @@ WITH ranked AS (
 SELECT brand, url, seen_at
 FROM ranked
 WHERE rn <= :k
-ORDER BY brand, seen_at DESC
+ORDER BY brand, seen_at DESC, url
 LIMIT :cap
 """
 

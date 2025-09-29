@@ -214,6 +214,10 @@ def create_app() -> FastAPI:
                 "meta": _json_safe(resp_meta.get("meta")) if resp_meta.get("meta") is not None else None,
                 "execution": _json_safe(resp_meta.get("execution")) if resp_meta.get("execution") is not None else None,
                 "breadcrumbs": _json_safe(resp_meta.get("breadcrumbs")) if resp_meta.get("breadcrumbs") is not None else None,
+                "result": _json_safe(resp_meta.get("result")) if resp_meta.get("result") is not None else None,
+                "metrics": _json_safe(resp_meta.get("metrics")) if resp_meta.get("metrics") is not None else None,
+                "linkable_columns": _json_safe(resp_meta.get("linkable_columns")) if resp_meta.get("linkable_columns") is not None else None,
+                "notes": _json_safe(resp_meta.get("notes")) if resp_meta.get("notes") is not None else None,
                 "ui_force_plan": bool(resp_meta.get("ui_force_plan")) if isinstance(resp_meta, dict) else False,
                 "error": resp_meta.get("error"),
             }

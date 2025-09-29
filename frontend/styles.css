@@ -475,6 +475,44 @@ pre {
   color: #424a6a;
   font-size: 12px;
 }
+.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 0.92rem;
+}
+.result-table th,
+.result-table td {
+  border-bottom: 1px solid #e2e6f0;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.result-table tbody tr:nth-child(odd) {
+  background: #f8f9fc;
+}
+.result-table a {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+.result-table a:hover,
+.result-table a:focus {
+  text-decoration: underline;
+}
+.result-meta {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+.result-notes {
+  margin-top: 6px;
+  padding-left: 18px;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+.result-notes li {
+  margin-bottom: 2px;
+}
 .bubble .content p { margin: 0 0 8px; }
 .bubble .content ul, .bubble .content ol { margin: 6px 0 10px 20px; }
 .bubble .content code { padding: 2px 4px; border-radius: 4px; }

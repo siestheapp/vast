@@ -36,7 +36,11 @@ def test_accepts_valid_sql_passthrough(monkeypatch):
 
     def fake_execute_sql(sql, **kwargs):
         calls["execute"] += 1
-        return {"rows": []}
+        return {
+            "rows": [{"title": "A Film"}],
+            "row_count": 1,
+            "meta": {"engine_ms": 5, "exec_ms": 7},
+        }
 
     monkeypatch.setattr(service, "ensure_valid_identifiers", fake_ensure)
     monkeypatch.setattr(service, "execute_sql", fake_execute_sql)
@@ -45,6 +49,9 @@ def test_accepts_valid_sql_passthrough(monkeypatch):
     assert result["sql"] == sql
     assert result.get("passthrough") is True
     assert result["intent"] == "read"
+    assert result["result"]["columns"] == ["title"]
+    assert result["result"]["row_count"] == 1
+    assert result["metrics"]["exec_ms"] == 7
     assert calls == {"ensure": 1, "execute": 1}
 
 
@@ -57,7 +64,11 @@ def test_planner_for_nl_text(monkeypatch):
         return PlanResult(sql="SELECT title FROM public.film LIMIT 1")
 
     def fake_execute_sql(sql, **kwargs):
-        return {"rows": []}
+        return {
+            "rows": [{"title": "A Film", "url": "http://example.com"}],
+            "row_count": 1,
+            "meta": {"engine_ms": 4, "exec_ms": 6},
+        }
 
     monkeypatch.setattr(service, "plan_sql_with_retry", fake_plan)
     monkeypatch.setattr(service, "execute_sql", fake_execute_sql)
@@ -65,6 +76,8 @@ def test_planner_for_nl_text(monkeypatch):
 
     res = service.plan_and_execute(q)
     assert res["intent"] == "read"
+    assert res["result"]["columns"] == ["title", "url"]
+    assert res["metrics"]["exec_ms"] == 6
     assert planner_called["count"] == 1
 
 
@@ -90,3 +103,35 @@ def test_plan_and_execute_write_intent(monkeypatch):
     assert executed["called"] is True
     assert executed["allow_writes"] is True
     assert result["intent"] == "write"
+
+
+def test_plan_and_execute_read_payload_details(monkeypatch):
+    sql = "select url, seen_at from public.product_url limit 2"
+
+    monkeypatch.setattr(service, "plan_sql_with_retry", _raise_planner)
+    monkeypatch.setattr(service, "plan_sql", _raise_planner)
+
+    def fake_ensure(sql, **kwargs):
+        return None
+
+    def fake_execute_sql(sql, **kwargs):
+        return {
+            "rows": [
+                {"url": "http://example.com/one", "seen_at": "2024-01-01T00:00:00"},
+                {"url": "http://example.com/two", "seen_at": "2024-01-02T00:00:00"},
+            ],
+            "row_count": 2,
+            "meta": {"engine_ms": 3, "exec_ms": 5},
+        }
+
+    monkeypatch.setattr(service, "ensure_valid_identifiers", fake_ensure)
+    monkeypatch.setattr(service, "execute_sql", fake_execute_sql)
+
+    result = service.plan_and_execute(sql)
+
+    assert result["intent"] == "read"
+    assert result["result"]["columns"] == ["url", "seen_at"]
+    assert len(result["result"]["rows"]) == 2
+    assert result["metrics"] == {"engine_ms": 3, "exec_ms": 5}
+    assert result["linkable_columns"] == ["url"]
+    assert any("seen_at" in note for note in result.get("notes", []))

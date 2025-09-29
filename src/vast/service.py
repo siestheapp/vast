@@ -6,6 +6,8 @@ import json
 import logging
 import re
 import time
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Set, Tuple
 from contextlib import contextmanager
@@ -149,6 +151,92 @@ def _breadcrumbs_from_meta(meta: Dict[str, Any] | None, deterministic_hint: bool
         breadcrumbs["llm_ms"] = meta["llm_ms"]
 
     return breadcrumbs or None
+
+
+def _coerce_cell(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        if value == int(value):
+            return int(value)
+        return float(value)
+    try:
+        return json.loads(json.dumps(value))
+    except Exception:  # pragma: no cover - defensive
+        return str(value)
+
+
+def _rows_to_table(rows: List[Any]) -> Tuple[List[str], List[List[Any]]]:
+    if not rows:
+        return [], []
+
+    first = rows[0]
+    if isinstance(first, dict):
+        columns = list(first.keys())
+        table_rows = [
+            [_coerce_cell(row.get(col)) for col in columns]
+            for row in rows
+        ]
+        return columns, table_rows
+
+    if isinstance(first, (list, tuple)):
+        columns = [f"col_{idx + 1}" for idx in range(len(first))]
+        table_rows = [[_coerce_cell(cell) for cell in row] for row in rows]
+        return columns, table_rows
+
+    return ["value"], [[_coerce_cell(row)] for row in rows]
+
+
+def _attach_read_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or payload.get("intent") != "read":
+        return payload
+
+    sql_text = payload.get("sql")
+    execution = payload.get("execution")
+    if not sql_text or not execution:
+        return payload
+
+    rows = execution.get("rows") or []
+    columns, table_rows = _rows_to_table(rows)
+
+    row_count = execution.get("row_count")
+    if row_count is None:
+        row_count = len(rows)
+
+    payload["result"] = {
+        "columns": columns,
+        "rows": table_rows[:50],
+        "row_count": row_count,
+    }
+
+    metrics: Dict[str, Any] = {}
+    execution_meta = execution.get("meta") or {}
+    engine_ms = execution_meta.get("engine_ms")
+    exec_ms = execution_meta.get("exec_ms")
+    if engine_ms is None:
+        engine_ms = (payload.get("meta") or {}).get("engine_ms")
+    if exec_ms is None:
+        exec_ms = (payload.get("meta") or {}).get("exec_ms")
+    if engine_ms is not None:
+        metrics["engine_ms"] = engine_ms
+    if exec_ms is not None:
+        metrics["exec_ms"] = exec_ms
+    if metrics:
+        payload["metrics"] = metrics
+
+    lower_columns = [col.lower() for col in columns]
+    linkable = [col for col, lower in zip(columns, lower_columns) if lower == "url"]
+    if linkable:
+        payload["linkable_columns"] = linkable
+
+    if "seen_at" in lower_columns and "created_at" not in lower_columns:
+        payload.setdefault("notes", []).append("Interpreting 'added' as latest seen_at")
+
+    return payload
 
 
 def _print_debug_timings(meta: Dict[str, Any]) -> None:
@@ -449,7 +537,7 @@ def plan_and_execute(
         }
         if breadcrumbs:
             outcome["breadcrumbs"] = breadcrumbs
-        return outcome
+        return _attach_read_result(outcome)
 
     try:
         resolution, shortcut = resolver_shortcut(nl_request)
@@ -536,7 +624,7 @@ def plan_and_execute(
             _print_debug_timings(meta)
         if breadcrumbs:
             outcome["breadcrumbs"] = breadcrumbs
-        return outcome
+        return _attach_read_result(outcome)
 
     focus_cards: List[Dict[str, Any]] = []
     if resolution:
@@ -680,7 +768,7 @@ def plan_and_execute(
         outcome["resolver"] = resolution
     if breadcrumbs:
         outcome["breadcrumbs"] = breadcrumbs
-    return outcome
+    return _attach_read_result(outcome)
 
 
 def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -> None:

@@ -132,6 +132,7 @@ const renderAssistant = (md) => {
 const attachBreadcrumbChip = (bubble, breadcrumbs) => {
   if (!bubble || !breadcrumbs || typeof breadcrumbs !== 'object') return;
   const content = bubble.querySelector('.content') || bubble;
+  content.querySelectorAll('.breadcrumbs-chip').forEach((node) => node.remove());
   const chip = document.createElement('div');
   chip.className = 'breadcrumbs-chip';
   const parts = [];
@@ -147,6 +148,32 @@ const attachBreadcrumbChip = (bubble, breadcrumbs) => {
   if (!parts.length) return;
   chip.textContent = parts.join(' • ');
   content.appendChild(chip);
+};
+
+const renderReadResult = (bubble, payload) => {
+  if (!bubble || !payload || payload.intent !== 'read') return;
+  const renderer = window.VASTReadRenderer;
+  if (!renderer || typeof renderer.buildReadResultHtml !== 'function') return;
+  const html = renderer.buildReadResultHtml(payload);
+  if (!html) return;
+  const content = bubble.querySelector('.content') || bubble;
+  content.insertAdjacentHTML('beforeend', html);
+};
+
+const decorateAssistantBubble = (bubble, payload) => {
+  if (!bubble) return;
+  if (payload && payload.intent) {
+    bubble.dataset.intent = payload.intent;
+  }
+  if (bubble && payload && typeof payload.ui_force_plan === 'boolean') {
+    bubble.dataset.uiForcePlan = String(!!payload.ui_force_plan);
+  } else if (bubble && bubble.dataset.uiForcePlan) {
+    delete bubble.dataset.uiForcePlan;
+  }
+  if (payload) {
+    renderReadResult(bubble, payload);
+    attachBreadcrumbChip(bubble, payload.breadcrumbs);
+  }
 };
 
 const showTypingIndicator = () => {
@@ -181,13 +208,7 @@ const sendChat = async () => {
     });
     hideTypingIndicator();
     const bubble = renderAssistant(data.response || '');
-    if (bubble && data.intent) {
-      bubble.dataset.intent = data.intent;
-    }
-    if (bubble && typeof data.ui_force_plan === 'boolean') {
-      bubble.dataset.uiForcePlan = String(!!data.ui_force_plan);
-    }
-    attachBreadcrumbChip(bubble, data.breadcrumbs);
+    decorateAssistantBubble(bubble, data);
     if (lastResponse) {
       lastResponse.textContent = formatTime();
     }

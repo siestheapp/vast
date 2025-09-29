@@ -1069,15 +1069,9 @@ Remember: You are VAST, with direct database access. Current context:
                         retry=True,
                         max_retries=2,
                     )
-                    self.last_response_meta = {
-                        "intent": exec_out.get("intent"),
-                        "sql": exec_out.get("sql"),
-                        "meta": exec_out.get("meta"),
-                        "execution": exec_out.get("execution"),
-                        "breadcrumbs": exec_out.get("breadcrumbs"),
-                        # If the user asked for a plan/migration, surface a UI hint
-                        "ui_force_plan": _is_ops_plan_request(user_input),
-                    }
+                    meta_copy = dict(exec_out)
+                    meta_copy["ui_force_plan"] = _is_ops_plan_request(user_input)
+                    self.last_response_meta = meta_copy
                     execution = exec_out.get("execution", exec_out)
                     rows = execution.get("rows", []) or []
                     row_count = execution.get("row_count", len(rows))

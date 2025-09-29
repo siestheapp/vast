@@ -22,6 +22,7 @@ from .agent import (
 )
 from .config import settings
 from .db import get_engine, get_ro_engine
+from .catalog_pg import load_card
 from .introspect import list_tables, table_columns
 from .identifier_guard import extract_requested_identifiers
 from .sql_params import hydrate_readonly_params, normalize_limit_literal, stmt_kind
@@ -113,7 +114,7 @@ def looks_like_sql(text: str | None) -> bool:
 
 
 def _print_debug_timings(meta: Dict[str, Any]) -> None:
-    catalog_ms = meta.get("catalog_ms", 0)
+    catalog_ms = meta.get("catalog_ms", meta.get("catalog_ms_slim", 0))
     plan_ms = meta.get("plan_ms", 0)
     engine_ms = meta.get("engine_ms", 0)
     exec_ms = meta.get("exec_ms", 0)
@@ -380,6 +381,7 @@ def plan_and_execute(
         meta = {
             "intent": "sql",
             "catalog_ms": 0,
+            "catalog_ms_slim": 0,
             "plan_ms": 0,
             "engine_ms": engine_ms,
             "exec_ms": exec_ms,
@@ -407,6 +409,17 @@ def plan_and_execute(
         logger.debug("Resolver shortcut failed: %s", exc)
         resolution, shortcut = None, None
 
+    if debug and resolution:
+        preview = [
+            {
+                "table": f"{c.get('schema')}.{c.get('table')}" if c.get("schema") and c.get("table") else c.get("table") or c.get("schema"),
+                "score": c.get("score"),
+            }
+            for c in (resolution.get("candidates") or [])
+        ]
+        if preview:
+            print(f"debug resolver candidates={preview}")
+
     resolution_meta = {}
     if resolution:
         resolution_meta = resolution.get("meta", {}) or {}
@@ -417,6 +430,7 @@ def plan_and_execute(
         if "sql" not in shortcut:
             meta = dict(shortcut.get("meta") or {})
             meta.setdefault("catalog_ms", catalog_ms)
+            meta.setdefault("catalog_ms_slim", meta.get("catalog_ms", catalog_ms))
             meta.setdefault("plan_ms", plan_ms)
             meta.setdefault("engine_ms", meta.get("engine_ms", 0))
             meta.setdefault("exec_ms", meta.get("exec_ms", 0))
@@ -434,6 +448,7 @@ def plan_and_execute(
 
         meta = dict(shortcut.get("meta") or {})
         meta.setdefault("catalog_ms", catalog_ms)
+        meta.setdefault("catalog_ms_slim", meta.get("catalog_ms", catalog_ms))
         meta.setdefault("plan_ms", plan_ms)
         meta.setdefault("engine_ms", meta.get("engine_ms", 0))
         meta.setdefault("exec_ms", meta.get("exec_ms", 0))
@@ -459,6 +474,23 @@ def plan_and_execute(
             _print_debug_timings(meta)
         return outcome
 
+    focus_cards: List[Dict[str, Any]] = []
+    if resolution:
+        for candidate in (resolution.get("candidates") or [])[:3]:
+            schema = candidate.get("schema")
+            table = candidate.get("table")
+            if not schema or not table:
+                continue
+            try:
+                card = load_card(schema, table)
+            except (FileNotFoundError, json.JSONDecodeError):
+                continue
+            except Exception:  # pragma: no cover - defensive
+                continue
+            focus_cards.append(card)
+            if len(focus_cards) >= 3:
+                break
+
     llm_start = time.perf_counter()
     if retry:
         sql = plan_sql_with_retry(
@@ -468,6 +500,7 @@ def plan_and_execute(
             param_hints=param_hints,
             max_retries=max_retries,
             validator=_validation_executor,
+            focus_cards=focus_cards,
         )
     else:
         sql = plan_sql(
@@ -475,6 +508,7 @@ def plan_and_execute(
             allow_writes=allow_writes,
             force_refresh_schema=refresh_schema,
             param_hints=param_hints,
+            focus_cards=focus_cards,
         )
     llm_ms = int((time.perf_counter() - llm_start) * 1000)
 
@@ -489,6 +523,7 @@ def plan_and_execute(
     meta = {
         "intent": (resolution or {}).get("intent", "unknown"),
         "catalog_ms": catalog_ms,
+        "catalog_ms_slim": catalog_ms,
         "plan_ms": plan_ms,
         "engine_ms": engine_ms,
         "exec_ms": exec_ms,

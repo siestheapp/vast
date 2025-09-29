@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from .db import get_ro_engine
 
 _TEXT_TYPES = {"char", "varchar", "text", "citext", "name", "uuid"}
-_PREFERRED_LIST_COLUMNS = ["username", "email", "name", "slug", "title"]
+PREFERRED_LIST_COLUMNS = ["username", "email", "name", "slug", "title"]
 _ALIAS_WEIGHT = 0.6
 _TABLE_WEIGHT = 0.3
 _COLUMN_WEIGHT = 0.1
@@ -25,18 +25,38 @@ _INTENT_PATTERNS = {
 }
 
 
-def resolve_entities(utterance: str, cards: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+def resolve_entities(utterance: str, tables_index: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Resolve an utterance into an intent, table candidates, and column hints."""
 
     intent = _detect_intent(utterance)
     tokens = _tokenize(utterance)
     token_string = " ".join(tokens)
-    candidates = _score_candidates(tokens, token_string, cards)
+    tables_scope = list(tables_index)
+
+    user_terms = {"user", "users", "account", "member"}
+    user_columns = {"username", "email", "user_id", "account_id", "last_login", "is_active"}
+
+    if user_terms & set(tokens):
+        filtered = []
+        for entry in tables_scope:
+            columns = entry.get("columns") or []
+            column_names = {
+                (str(col.get("name")) or "").lower()
+                for col in columns
+                if col.get("name")
+            }
+            if column_names & user_columns:
+                filtered.append(entry)
+        if filtered:
+            tables_scope = filtered
+        else:
+            tables_scope = []
+
+    candidates = _score_candidates(tokens, token_string, tables_scope)
 
     column_hints: List[str] = []
     if intent == "list" and candidates:
-        best_card = cards.get(candidates[0]["key"], {})
-        column_hints = _column_hints(best_card)
+        column_hints = _column_hints(candidates[0].get("columns") or [])
 
     return {
         "intent": intent,
@@ -45,6 +65,9 @@ def resolve_entities(utterance: str, cards: Dict[str, Dict[str, Any]]) -> Dict[s
                 "schema": c["schema"],
                 "table": c["table"],
                 "score": c["score"],
+                "key": c["key"],
+                "columns": c.get("columns", []),
+                "aliases": c.get("aliases", []),
             }
             for c in candidates[:_TOP_K]
         ],
@@ -126,19 +149,25 @@ def _singularize(token: str) -> str:
     return token
 
 
-def _score_candidates(tokens: Sequence[str], token_string: str, cards: Dict[str, Dict[str, Any]]):
+def _score_candidates(
+    tokens: Sequence[str],
+    token_string: str,
+    tables_index: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     scored: List[Dict[str, Any]] = []
     token_set = set(tokens)
 
-    for key, card in cards.items():
-        schema = card.get("schema")
-        table = card.get("table")
+    for entry in tables_index:
+        schema = entry.get("schema")
+        table = entry.get("table")
         if not schema or not table:
             continue
 
-        alias_score = _score_aliases(card.get("aliases") or [], tokens, token_string)
+        aliases = entry.get("aliases") or []
+        columns = entry.get("columns") or []
+        alias_score = _score_aliases(aliases, tokens, token_string)
         table_score = _score_table_name(table, tokens, token_set)
-        column_score = _score_columns(card.get("columns") or [], token_set)
+        column_score = _score_columns(columns, token_set)
 
         score = (
             _ALIAS_WEIGHT * alias_score
@@ -151,10 +180,12 @@ def _score_candidates(tokens: Sequence[str], token_string: str, cards: Dict[str,
 
         scored.append(
             {
-                "key": key,
+                "key": entry.get("key") or f"{schema}.{table}",
                 "schema": schema,
                 "table": table,
                 "score": round(score, 4),
+                "columns": columns,
+                "aliases": aliases,
             }
         )
 
@@ -214,15 +245,14 @@ def _score_columns(columns: Sequence[Dict[str, Any]], token_set: set[str]) -> fl
     return min(score, 2.0)
 
 
-def _column_hints(card: Dict[str, Any]) -> List[str]:
-    columns = card.get("columns") or []
+def _column_hints(columns: Sequence[Dict[str, Any]]) -> List[str]:
     available_names = {
-        str(col.get("name") or "").lower(): str(col.get("name") or "")
+        (str(col.get("name")) or "").lower(): str(col.get("name") or "")
         for col in columns
     }
     hints: List[str] = []
 
-    for preferred in _PREFERRED_LIST_COLUMNS:
+    for preferred in PREFERRED_LIST_COLUMNS:
         column_name = available_names.get(preferred)
         if not column_name:
             continue
@@ -273,4 +303,5 @@ __all__ = [
     "resolve_entities",
     "run_template_count",
     "run_template_list",
+    "PREFERRED_LIST_COLUMNS",
 ]

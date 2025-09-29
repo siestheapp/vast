@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -24,6 +25,7 @@ SELECT
 
 CARDS_DIR = Path(".vast/schema_cards")
 INDEX_PATH = Path(".vast/schema_index.json")
+SLIM_INDEX_PATH = Path(".vast/schema_index.slim.json")
 EXAMPLE_LIMIT = 5
 EXAMPLE_TIMEOUT = "750ms"
 
@@ -51,6 +53,27 @@ _ALIAS_SEEDS = {
 
 _CARDS_CACHE: Dict[str, Dict[str, Any]] | None = None
 _CARDS_FP: Optional[str] = None
+
+_USER_ALIAS_VALUES = ["user", "users", "account", "member"]
+_USER_ALIAS_DENY = {"variant", "style", "category", "product", "brand"}
+_USER_ALIAS_REGEX = re.compile(r"\b(user|account|member|profile)s?\b", re.IGNORECASE)
+_USER_STRONG_COLS = {
+    "email",
+    "username",
+    "user_id",
+    "account_id",
+    "last_login",
+    "is_active",
+    "password",
+}
+
+_BRAND_ALIAS_VALUES = ["brand", "brands", "profile"]
+_BRAND_KEYWORDS = {"brand", "profile"}
+_BRAND_STRONG_COLS = {"brand_id", "brand_name", "name", "slug", "brand_slug"}
+
+_PRODUCT_ALIAS_VALUES = ["product", "products", "item", "items"]
+_PRODUCT_KEYWORDS = {"product", "products", "item", "items"}
+_PRODUCT_STRONG_COLS = {"price", "currency", "sku", "upc", "product_id"}
 
 
 def _fetch_all(sql: str, params: dict | None = None) -> List[Dict[str, object]]:
@@ -428,12 +451,29 @@ def build_schema_cards() -> Dict[str, Dict[str, Any]]:
             if col.get("name")
         }
 
-        if {"email", "username", "last_login", "is_active"} & colnames:
-            alias_set.update(_normalize_alias(value) for value in ("user", "users", "account", "member"))
-        if {"slug", "name"} & colnames:
-            alias_set.update(_normalize_alias(value) for value in ("brand", "brands", "profile"))
-        if {"price", "currency", "sku", "upc"} & colnames:
-            alias_set.update(_normalize_alias(value) for value in ("product", "products", "item", "items"))
+        def _table_contains_keywords(keywords: Iterable[str]) -> bool:
+            return any(keyword in table_lower for keyword in keywords)
+
+        user_alias_allowed = False
+        if table_lower not in _USER_ALIAS_DENY:
+            if _USER_ALIAS_REGEX.search(table_lower):
+                user_alias_allowed = True
+            else:
+                strong_count = sum(1 for col in _USER_STRONG_COLS if col in colnames)
+                if strong_count >= 2:
+                    user_alias_allowed = True
+        if user_alias_allowed:
+            alias_set.update(_normalize_alias(value) for value in _USER_ALIAS_VALUES)
+
+        brand_match = _table_contains_keywords(_BRAND_KEYWORDS)
+        brand_strong_count = sum(1 for col in _BRAND_STRONG_COLS if col in colnames)
+        if brand_match or brand_strong_count >= 2:
+            alias_set.update(_normalize_alias(value) for value in _BRAND_ALIAS_VALUES)
+
+        product_match = _table_contains_keywords(_PRODUCT_KEYWORDS)
+        product_strong_count = sum(1 for col in _PRODUCT_STRONG_COLS if col in colnames)
+        if product_match or product_strong_count >= 2:
+            alias_set.update(_normalize_alias(value) for value in _PRODUCT_ALIAS_VALUES)
 
         card["aliases"] = sorted(alias for alias in alias_set if alias)
 
@@ -483,6 +523,10 @@ def save_schema_cards(cards: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
     index_payload = {"fingerprint": fp, "tables": tables_index}
     INDEX_PATH.write_text(json.dumps(index_payload, indent=2, sort_keys=True))
+
+    slim_payload = build_schema_index_slim(cards, fingerprint=fp)
+    save_schema_index_slim(slim_payload)
+
     return index_payload
 
 
@@ -502,6 +546,66 @@ def _load_cards_from_disk(table_entries: Sequence[Dict[str, Any]]) -> Optional[D
             logger.warning("Failed to parse schema card %s", path)
             return None
     return cards
+
+
+def build_schema_index_slim(
+    cards: Dict[str, Dict[str, Any]],
+    fingerprint: Optional[str] = None,
+) -> Dict[str, Any]:
+    tables: List[Dict[str, Any]] = []
+    for key in sorted(cards, key=lambda item: (cards[item].get("schema"), cards[item].get("table"))):
+        card = cards[key]
+        schema = card.get("schema")
+        table = card.get("table")
+        columns = []
+        for col in card.get("columns") or []:
+            name = col.get("name")
+            if not name:
+                continue
+            col_type = col.get("type")
+            columns.append({
+                "name": name,
+                "type": str(col_type) if col_type is not None else None,
+            })
+        tables.append(
+            {
+                "key": key,
+                "schema": schema,
+                "table": table,
+                "aliases": list(card.get("aliases", [])),
+                "columns": columns,
+            }
+        )
+    return {
+        "fingerprint": fingerprint or schema_fingerprint(cards),
+        "tables": tables,
+    }
+
+
+def save_schema_index_slim(index_data: Dict[str, Any]) -> None:
+    SLIM_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SLIM_INDEX_PATH.write_text(json.dumps(index_data, indent=2, sort_keys=True))
+
+
+def load_schema_index_slim() -> Dict[str, Any]:
+    if SLIM_INDEX_PATH.exists():
+        try:
+            return json.loads(SLIM_INDEX_PATH.read_text())
+        except json.JSONDecodeError:
+            logger.warning("Slim schema index corrupted; rebuilding")
+
+    payload = load_schema_cards(refresh=False)
+    cards = payload.get("cards") or {}
+    fingerprint = payload.get("fingerprint")
+    slim_payload = build_schema_index_slim(cards, fingerprint=fingerprint)
+    save_schema_index_slim(slim_payload)
+    return slim_payload
+
+
+def load_card(schema: str, table: str) -> Dict[str, Any]:
+    path = _card_path(schema, table)
+    data = json.loads(path.read_text())
+    return data
 
 
 def load_schema_cards(refresh: bool = False) -> Dict[str, Any]:
@@ -546,11 +650,17 @@ def load_schema_cards(refresh: bool = False) -> Dict[str, Any]:
         meta = save_schema_cards(cards)
         return _package(cards, meta)
 
-    return {
+    result = {
         "cards": cards,
         "fingerprint": stored_fp or current_fp,
         "tables": tables_entry,
     }
+
+    if not SLIM_INDEX_PATH.exists():
+        slim_payload = build_schema_index_slim(cards, fingerprint=result.get("fingerprint"))
+        save_schema_index_slim(slim_payload)
+
+    return result
 
 
 def get_cached_cards() -> Dict[str, Dict[str, Any]]:
@@ -583,6 +693,10 @@ def table_aliases(cards: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
 __all__ = [
     "load_schema_cards",
     "get_cached_cards",
+    "load_schema_index_slim",
+    "build_schema_index_slim",
+    "save_schema_index_slim",
+    "load_card",
     "build_schema_cards",
     "save_schema_cards",
     "schema_fingerprint",

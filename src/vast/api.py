@@ -204,10 +204,18 @@ def create_app() -> FastAPI:
         conv = conversations[sess]
         try:
             resp_text = conv.process(payload.message, auto_execute=payload.auto_execute)
+            resp_meta = getattr(conv, "last_response_meta", None) or {}
             return {
                 "session": conv.session_name,
                 "response": resp_text,
                 "actions": _json_safe(conv.last_actions),
+                "intent": resp_meta.get("intent"),
+                "sql": resp_meta.get("sql"),
+                "meta": _json_safe(resp_meta.get("meta")) if resp_meta.get("meta") is not None else None,
+                "execution": _json_safe(resp_meta.get("execution")) if resp_meta.get("execution") is not None else None,
+                "breadcrumbs": _json_safe(resp_meta.get("breadcrumbs")) if resp_meta.get("breadcrumbs") is not None else None,
+                "ui_force_plan": bool(resp_meta.get("ui_force_plan")) if isinstance(resp_meta, dict) else False,
+                "error": resp_meta.get("error"),
             }
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

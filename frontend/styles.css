@@ -466,6 +466,15 @@ pre {
   line-height: 1.5; 
   white-space: normal; 
 }
+.breadcrumbs-chip {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: #e4e8f5;
+  color: #424a6a;
+  font-size: 12px;
+}
 .bubble .content p { margin: 0 0 8px; }
 .bubble .content ul, .bubble .content ol { margin: 6px 0 10px 20px; }
 .bubble .content code { padding: 2px 4px; border-radius: 4px; }

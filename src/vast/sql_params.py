@@ -19,6 +19,7 @@ DEFAULTS_RO: Dict[str, int] = {
 _BIND_RE = re.compile(r":([a-zA-Z_][a-zA-Z0-9_]*)")
 _LEADING_COMMENT_RE = re.compile(r"^(\s*--[^\n]*\n|\s*/\*.*?\*/\s*)+", re.DOTALL)
 _LIMIT_BIND_RE = re.compile(r"(?i)\bLIMIT\s+:limit\b")
+_LIMIT_LITERAL_RE = re.compile(r"(?i)\bLIMIT\s+(\d+)\b")
 
 
 def _strip_leading_comments(sql: str) -> str:
@@ -71,6 +72,24 @@ def normalize_limit_literal(sql: str, params: Dict[str, object] | None) -> str:
         return sql
 
     return _LIMIT_BIND_RE.sub(f"LIMIT {DEFAULT_LIMIT}", sql)
+
+
+def ensure_limit_param(sql: str, params: Dict[str, object] | None) -> Dict[str, object]:
+    """Guarantee a numeric `limit` parameter when a literal LIMIT is present."""
+
+    provided = dict(params or {})
+    if "limit" in provided:
+        return provided
+
+    match = _LIMIT_LITERAL_RE.search(sql or "")
+    if not match:
+        return provided
+
+    try:
+        provided["limit"] = int(match.group(1))
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return provided
+    return provided
 
 
 def stmt_kind(sql: str) -> str:

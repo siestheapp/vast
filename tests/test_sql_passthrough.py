@@ -44,6 +44,7 @@ def test_accepts_valid_sql_passthrough(monkeypatch):
     result = service.plan_and_execute(sql)
     assert result["sql"] == sql
     assert result.get("passthrough") is True
+    assert result["intent"] == "read"
     assert calls == {"ensure": 1, "execute": 1}
 
 
@@ -60,6 +61,32 @@ def test_planner_for_nl_text(monkeypatch):
 
     monkeypatch.setattr(service, "plan_sql_with_retry", fake_plan)
     monkeypatch.setattr(service, "execute_sql", fake_execute_sql)
+    monkeypatch.setattr(service, "resolver_shortcut", lambda *_args, **_kwargs: (None, None))
 
-    service.plan_and_execute(q)
+    res = service.plan_and_execute(q)
+    assert res["intent"] == "read"
     assert planner_called["count"] == 1
+
+
+def test_plan_and_execute_write_intent(monkeypatch):
+    q = "change a film title"
+
+    def fake_plan(*args, **kwargs):
+        return PlanResult(sql="UPDATE public.film SET title = 'New' WHERE film_id = 1;")
+
+    executed = {"called": False, "allow_writes": None}
+
+    def fake_execute_sql(sql, allow_writes=False, force_write=False, **_):
+        executed["called"] = True
+        executed["allow_writes"] = allow_writes
+        return {"rows": [], "meta": {"engine_ms": 5, "exec_ms": 5}}
+
+    monkeypatch.setattr(service, "plan_sql_with_retry", fake_plan)
+    monkeypatch.setattr(service, "execute_sql", fake_execute_sql)
+    monkeypatch.setattr(service, "resolver_shortcut", lambda *_args, **_kwargs: (None, None))
+
+    result = service.plan_and_execute(q, allow_writes=True, force_write=True)
+
+    assert executed["called"] is True
+    assert executed["allow_writes"] is True
+    assert result["intent"] == "write"

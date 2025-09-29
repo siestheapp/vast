@@ -114,6 +114,7 @@ class VastConversation:
         self.messages: List[Message] = []
         self.context: ConversationContext = None
         self.last_actions: List[Dict[str, Any]] = []
+        self.last_response_meta: Dict[str, Any] | None = None
         
         self.client = OpenAI(api_key=settings.openai_api_key)
         self.engine = get_engine()
@@ -723,6 +724,7 @@ Remember: You are VAST, with direct database access. Current context:
         Process user input and return VAST's response.
         This is where VAST acts as your DBA/CTO.
         """
+        self.last_response_meta = None
         # Add user message to history
         user_msg = Message(role=MessageRole.USER, content=user_input)
         self.messages.append(user_msg)
@@ -827,14 +829,16 @@ Remember: You are VAST, with direct database access. Current context:
             response = _ensure_ops_plan_sections(response)
             assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)
             self.messages.append(assistant_msg)
+            # Expose UI hint so the renderer can show scaffold explicitly
+            self.last_response_meta = {"ui_force_plan": True}
             self._save_session()
             return response
 
         # Get LLM response
         response = self._get_llm_response(user_input)
 
-        if _is_ops_plan_request(user_input):
-            response = _ensure_ops_plan_sections(response)
+        # Do not inject plan scaffold into the text here; the UI can render a scaffold
+        # when explicitly requested via the ui_force_plan flag.
 
         # Extract all code blocks
         code_blocks = self._extract_code_blocks(response)
@@ -1065,6 +1069,15 @@ Remember: You are VAST, with direct database access. Current context:
                         retry=True,
                         max_retries=2,
                     )
+                    self.last_response_meta = {
+                        "intent": exec_out.get("intent"),
+                        "sql": exec_out.get("sql"),
+                        "meta": exec_out.get("meta"),
+                        "execution": exec_out.get("execution"),
+                        "breadcrumbs": exec_out.get("breadcrumbs"),
+                        # If the user asked for a plan/migration, surface a UI hint
+                        "ui_force_plan": _is_ops_plan_request(user_input),
+                    }
                     execution = exec_out.get("execution", exec_out)
                     rows = execution.get("rows", []) or []
                     row_count = execution.get("row_count", len(rows))
@@ -1098,6 +1111,10 @@ Remember: You are VAST, with direct database access. Current context:
                     return final
                 except Exception as exc:
                     err = f"Query planning/execution failed: {exc}"
+                    self.last_response_meta = {
+                        "intent": "unknown",
+                        "error": str(exc),
+                    }
                     assistant_msg = Message(role=MessageRole.ASSISTANT, content=err)
                     self.messages.append(assistant_msg)
                     self._save_session()

@@ -29,6 +29,7 @@ def test_ops_plan_includes_standard_headings(monkeypatch, tmp_path):
 
     response = conv.process("Please backfill a new attribute and outline the plan")
 
+    # Text includes headings since this is an explicit plan request.
     for heading in ("Plan:", "Staging:", "Validation:", "Rollback:"):
         assert heading in response
     assert re.search(r"(?i)(schema|ddl)", response)

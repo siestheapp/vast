@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -34,7 +35,7 @@ def test_cli_latest_per_group_debug_output():
 
     # Run CLI in debug mode and capture output
     proc = subprocess.run(
-        ["python", "cli.py", "ask", "latest 5 product urls per brand", "--debug"],
+        [sys.executable, "cli.py", "ask", "latest 5 product urls per brand", "--debug"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

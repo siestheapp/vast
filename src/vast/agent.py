@@ -28,7 +28,7 @@ from .identifier_guard import (
     IdentifierValidationError,
     extract_requested_identifiers,
 )
-from .sql_params import hydrate_readonly_params, normalize_limit_literal, stmt_kind
+from .sql_params import ensure_limit_param, hydrate_readonly_params, normalize_limit_literal, stmt_kind
 from .settings import STRICT_IDENTIFIER_MODE
 
 console = Console()
@@ -565,6 +565,7 @@ def _validate_with_guard(sql: str, params: Dict[str, Any], allow_writes: bool) -
     # Normalize first so LIMIT :limit becomes LIMIT 1 when missing
     normalized_sql = normalize_limit_literal(sql, params)
     hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    hydrated_params = ensure_limit_param(normalized_sql, hydrated_params)
     # Ensure hydrated_params reflects the implicit limit when normalized
     if normalized_sql.upper().endswith("LIMIT 1") and "limit" not in hydrated_params:
         hydrated_params["limit"] = 1

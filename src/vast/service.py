@@ -21,11 +21,11 @@ from .agent import (
     resolver_shortcut,
 )
 from .config import settings
-from .db import get_engine, get_ro_engine
+from .db import get_engine, get_ro_engine, is_select
 from .catalog_pg import load_card
 from .introspect import list_tables, table_columns
 from .identifier_guard import extract_requested_identifiers
-from .sql_params import hydrate_readonly_params, normalize_limit_literal, stmt_kind
+from .sql_params import ensure_limit_param, hydrate_readonly_params, normalize_limit_literal, stmt_kind
 from .actions import (
     pg_dump_database,
     pg_restore_list,
@@ -111,6 +111,44 @@ def looks_like_sql(text: str | None) -> bool:
         return False
     first_token = stripped.split(None, 1)[0].upper()
     return first_token in SQL_PREFIXES
+
+
+def _intent_from_sql(sql_text: str | None) -> str | None:
+    """Best effort classification of statement intent (read/write)."""
+
+    if not sql_text or not sql_text.strip():
+        return None
+    try:
+        return "read" if is_select(sql_text) else "write"
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("Failed to classify SQL intent", exc_info=True)
+        return None
+
+
+def _breadcrumbs_from_meta(meta: Dict[str, Any] | None, deterministic_hint: bool | None = None) -> Dict[str, Any] | None:
+    """Extract breadcrumb metadata surfaced to the UI."""
+
+    if not meta:
+        meta = {}
+
+    breadcrumbs: Dict[str, Any] = {}
+
+    if deterministic_hint is not None:
+        breadcrumbs["deterministic"] = deterministic_hint
+    else:
+        llm_ms = meta.get("llm_ms")
+        if llm_ms is not None:
+            breadcrumbs["deterministic"] = bool(llm_ms == 0 and not meta.get("handoff"))
+
+    if "rule" in meta:
+        breadcrumbs.setdefault("rule", meta.get("rule"))
+    elif "used_path" in meta:
+        breadcrumbs.setdefault("rule", meta.get("used_path"))
+
+    if "llm_ms" in meta:
+        breadcrumbs["llm_ms"] = meta["llm_ms"]
+
+    return breadcrumbs or None
 
 
 def _print_debug_timings(meta: Dict[str, Any]) -> None:
@@ -387,7 +425,13 @@ def plan_and_execute(
             "exec_ms": exec_ms,
             "llm_ms": 0,
             "total_ms": total_ms,
+            "handoff": False,
+            "handoff_reason": None,
+            "regenerated": False,
+            "allowed_tables": None,
         }
+        intent = _intent_from_sql(nl_request) or "write"
+        breadcrumbs = _breadcrumbs_from_meta(meta, deterministic_hint=False)
         if debug:
             _print_debug_timings(meta)
         if isinstance(execution, dict):
@@ -396,12 +440,16 @@ def plan_and_execute(
             existing_meta.setdefault("engine_ms", engine_ms)
             existing_meta.setdefault("exec_ms", exec_ms)
             execution["meta"] = existing_meta
-        return {
+        outcome = {
             "sql": nl_request,
             "execution": execution,
             "passthrough": True,
             "meta": meta,
+            "intent": intent,
         }
+        if breadcrumbs:
+            outcome["breadcrumbs"] = breadcrumbs
+        return outcome
 
     try:
         resolution, shortcut = resolver_shortcut(nl_request)
@@ -436,11 +484,16 @@ def plan_and_execute(
             meta.setdefault("exec_ms", meta.get("exec_ms", 0))
             meta.setdefault("llm_ms", 0)
             meta["total_ms"] = int((time.perf_counter() - total_start) * 1000)
+            meta.setdefault("handoff", False)
+            meta.setdefault("handoff_reason", None)
+            meta.setdefault("regenerated", False)
+            meta.setdefault("allowed_tables", None)
             if debug:
                 _print_debug_timings(meta)
             outcome = {
                 "answer": shortcut.get("answer"),
                 "meta": meta,
+                "intent": "unknown",
             }
             if resolution:
                 outcome["resolver"] = resolution
@@ -454,6 +507,10 @@ def plan_and_execute(
         meta.setdefault("exec_ms", meta.get("exec_ms", 0))
         meta.setdefault("llm_ms", 0)
         meta["total_ms"] = int((time.perf_counter() - total_start) * 1000)
+        meta.setdefault("handoff", False)
+        meta.setdefault("handoff_reason", None)
+        meta.setdefault("regenerated", False)
+        meta.setdefault("allowed_tables", None)
         execution = dict(shortcut.get("execution") or {})
         execution_meta = dict(execution.get("meta") or {})
         execution_meta.setdefault("engine_ms", meta.get("engine_ms", 0))
@@ -462,16 +519,23 @@ def plan_and_execute(
         if "row_count" not in execution:
             answer = shortcut.get("answer")
             execution["row_count"] = len(answer) if isinstance(answer, list) else 1
+        intent = _intent_from_sql(shortcut.get("sql")) or "write"
+        breadcrumbs = _breadcrumbs_from_meta(meta, deterministic_hint=True)
         outcome = {
             "sql": shortcut["sql"],
             "execution": execution,
             "answer": shortcut.get("answer"),
             "meta": meta,
+            "intent": intent,
         }
+        if debug and meta.get("used_path"):
+            print({"intent": meta.get("intent"), "used_path": meta.get("used_path")})
         if resolution:
             outcome["resolver"] = resolution
         if debug:
             _print_debug_timings(meta)
+        if breadcrumbs:
+            outcome["breadcrumbs"] = breadcrumbs
         return outcome
 
     focus_cards: List[Dict[str, Any]] = []
@@ -508,7 +572,7 @@ def plan_and_execute(
         }
         if debug:
             _print_debug_timings(meta)
-        outcome = {"answer": message, "meta": meta}
+        outcome = {"answer": message, "meta": meta, "intent": "unknown"}
         outcome["resolver"] = resolution
         return outcome
 
@@ -545,15 +609,23 @@ def plan_and_execute(
             "total_ms": int((time.perf_counter() - total_start) * 1000),
             "regenerated": plan_result.regenerated,
             "allowed_tables": plan_result.allowed_tables,
+            "handoff": bool(resolution and resolution.get("needs_llm")),
+            "handoff_reason": (resolution or {}).get("reason") if resolution and resolution.get("needs_llm") else None,
         }
         if debug:
             _print_debug_timings(meta)
-        outcome = {"answer": plan_result.clarification, "meta": meta}
+        outcome = {
+            "answer": plan_result.clarification,
+            "meta": meta,
+            "intent": "unknown",
+        }
         if resolution:
             outcome["resolver"] = resolution
         return outcome
 
     sql = plan_result.sql or ""
+    if sql and not sql.rstrip().endswith(";"):
+        sql = f"{sql.rstrip()};"
 
     if debug:
         print(f"debug regenerated={plan_result.regenerated}")
@@ -579,6 +651,8 @@ def plan_and_execute(
         "total_ms": total_ms,
         "regenerated": plan_result.regenerated,
         "allowed_tables": plan_result.allowed_tables,
+        "handoff": bool(resolution and resolution.get("needs_llm")),
+        "handoff_reason": (resolution or {}).get("reason") if resolution and resolution.get("needs_llm") else None,
     }
 
     if debug:
@@ -591,13 +665,21 @@ def plan_and_execute(
         exec_meta.setdefault("exec_ms", exec_ms)
         execution["meta"] = exec_meta
 
+    intent = _intent_from_sql(sql)
+    if intent is None:
+        intent = "unknown" if not sql else "write"
+    breadcrumbs = _breadcrumbs_from_meta(meta)
+
     outcome = {
         "sql": sql,
         "execution": execution,
         "meta": meta,
+        "intent": intent,
     }
     if resolution:
         outcome["resolver"] = resolution
+    if breadcrumbs:
+        outcome["breadcrumbs"] = breadcrumbs
     return outcome
 
 
@@ -606,6 +688,7 @@ def _validation_executor(sql: str, params: Dict[str, Any], allow_writes: bool) -
     params = _apply_limit_hint(sql, sql, params)
     normalized_sql = normalize_limit_literal(sql, params)
     hydrated_params = hydrate_readonly_params(normalized_sql, params)
+    hydrated_params = ensure_limit_param(normalized_sql, hydrated_params)
     sql_kind = stmt_kind(normalized_sql)
     if not allow_writes and sql_kind != "SELECT":
         keyword = normalized_sql.lstrip().split(None, 1)[0].upper() if (normalized_sql or "").strip() else ""

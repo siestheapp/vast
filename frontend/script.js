@@ -121,7 +121,32 @@ const splitMarkdownOutsideCodeFences = (md) => {
 const renderAssistant = (md) => {
   const chunks = splitMarkdownOutsideCodeFences(md || "");
   if (chunks.length <= 1) return appendBubble('assistant', md);
-  chunks.forEach(c => c.trim() && appendBubble('assistant', c.trim()));
+  let last;
+  chunks.forEach((c) => {
+    if (!c.trim()) return;
+    last = appendBubble('assistant', c.trim());
+  });
+  return last;
+};
+
+const attachBreadcrumbChip = (bubble, breadcrumbs) => {
+  if (!bubble || !breadcrumbs || typeof breadcrumbs !== 'object') return;
+  const content = bubble.querySelector('.content') || bubble;
+  const chip = document.createElement('div');
+  chip.className = 'breadcrumbs-chip';
+  const parts = [];
+  if (typeof breadcrumbs.deterministic === 'boolean') {
+    parts.push(breadcrumbs.deterministic ? 'Deterministic' : 'LLM');
+  }
+  if (breadcrumbs.rule) {
+    parts.push(`rule=${breadcrumbs.rule}`);
+  }
+  if (typeof breadcrumbs.llm_ms === 'number') {
+    parts.push(`llm_ms=${breadcrumbs.llm_ms}`);
+  }
+  if (!parts.length) return;
+  chip.textContent = parts.join(' • ');
+  content.appendChild(chip);
 };
 
 const showTypingIndicator = () => {
@@ -155,7 +180,14 @@ const sendChat = async () => {
       body: JSON.stringify({ message: msg, auto_execute: true, allow_writes: false }),
     });
     hideTypingIndicator();
-    renderAssistant(data.response || '');
+    const bubble = renderAssistant(data.response || '');
+    if (bubble && data.intent) {
+      bubble.dataset.intent = data.intent;
+    }
+    if (bubble && typeof data.ui_force_plan === 'boolean') {
+      bubble.dataset.uiForcePlan = String(!!data.ui_force_plan);
+    }
+    attachBreadcrumbChip(bubble, data.breadcrumbs);
     if (lastResponse) {
       lastResponse.textContent = formatTime();
     }

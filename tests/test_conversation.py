@@ -59,3 +59,6 @@ def test_auto_execute_ro_path_returns_scalar(monkeypatch, tmp_path):
     upper = result.upper()
     for keyword in ("DROP", "UPDATE", "INSERT", "DELETE"):
         assert keyword not in upper
+    # Ensure scaffold headings are not present for read intent responses
+    for heading in ("PLAN:", "STAGING:", "VALIDATION:", "ROLLBACK:"):
+        assert heading not in upper

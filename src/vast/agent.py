@@ -10,12 +10,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 
 from openai import OpenAI
 from rich.console import Console
+from sqlalchemy import text
 
 from .config import settings
 from .introspect import list_tables, table_columns
-from .db import safe_execute, get_engine
+from .db import safe_execute, get_engine, get_ro_engine, analyse_sql, is_select, add_limit
 from .knowledge import get_knowledge_store
-from .catalog_pg import load_schema_index_slim
+from .catalog_pg import load_schema_index_slim, load_card
 from .resolver import (
     PREFERRED_LIST_COLUMNS,
     resolve_entities,
@@ -39,6 +40,8 @@ _SCHEMA_STATE: Dict[str, Any] = {
 }
 
 _TEXTUAL_TYPE_HINTS = {"char", "varchar", "text", "citext", "name", "uuid", "character varying"}
+_LATEST_TEMPLATE_PATH = "product_url→style→brand"
+_TEMPLATE_TIMEOUT_MS = 2000
 
 
 @dataclass
@@ -84,6 +87,53 @@ def _select_list_column(columns: Sequence[Dict[str, Any]]) -> Optional[str]:
             return str(col.get("name"))
 
     return None
+
+
+def _find_column_name(card: Dict[str, Any], target: str) -> Optional[str]:
+    target_lower = target.lower()
+    for col in card.get("columns") or []:
+        name = col.get("name")
+        if name and name.lower() == target_lower:
+            return name
+    return None
+
+
+def _run_latest_urls_per_brand(k: int, columns: Dict[str, str]) -> Tuple[List[Dict[str, Any]], Dict[str, int], str]:
+    engine_start = time.perf_counter()
+    engine = get_ro_engine()
+    engine_ms = int((time.perf_counter() - engine_start) * 1000)
+
+    sql = """
+WITH ranked AS (
+  SELECT
+    pu."url"      AS url,
+    b."name"      AS brand,
+    pu."seen_at"  AS seen_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY s."brand_id"
+      ORDER BY pu."seen_at" DESC
+    ) AS rn
+  FROM "public"."product_url" pu
+  JOIN "public"."style" s  ON pu."style_id" = s."id"
+  JOIN "public"."brand" b  ON s."brand_id" = b."id"
+  WHERE COALESCE(pu."is_current", TRUE) = TRUE
+)
+SELECT brand, url, seen_at
+FROM ranked
+WHERE rn <= :k
+ORDER BY brand, seen_at DESC
+LIMIT :cap
+"""
+
+    params = {"k": k, "cap": max(200, k * 20)}
+
+    with engine.begin() as conn:
+        conn.execute(text(f"SET LOCAL statement_timeout = '{_TEMPLATE_TIMEOUT_MS}ms'"))
+        exec_start = time.perf_counter()
+        rows = conn.execute(text(sql), params).mappings().all()
+        exec_ms = int((time.perf_counter() - exec_start) * 1000)
+
+    return [dict(row) for row in rows], {"engine_ms": engine_ms, "exec_ms": exec_ms}, sql
 
 BASE_RULES = """You are Vast1, an AI database operator.
 
@@ -131,6 +181,108 @@ def resolver_shortcut(
     resolution["meta"] = meta
 
     candidates = resolution.get("candidates") or []
+
+    if resolution.get("needs_llm"):
+        meta.setdefault("reason", resolution.get("reason"))
+        return resolution, None
+
+    if resolution.get("intent") == "latest_per_group":
+        allowed_tables = ["public.product_url", "public.style", "public.brand"]
+        candidate = next((c for c in candidates if c.get("key") == "public.product_url"), None)
+        k_value = int(resolution.get("k") or 5)
+        item_noun = (resolution.get("item_noun") or "").lower()
+        group_noun = (resolution.get("group_noun") or "").lower()
+
+        def _noun_matches(noun: str, keywords: Sequence[str]) -> bool:
+            noun_lower = noun.lower()
+            return any(keyword in noun_lower for keyword in keywords)
+
+        if not candidate or not _noun_matches(item_noun, ["product url", "product urls", "url", "urls"]) or not _noun_matches(group_noun, ["brand", "brands"]):
+            resolution["needs_llm"] = True
+            resolution["reason"] = "latest_per_group_unsupported"
+            meta.setdefault("reason", resolution["reason"])
+            return resolution, None
+
+        try:
+            card_product_url = load_card("public", "product_url")
+            card_style = load_card("public", "style")
+            card_brand = load_card("public", "brand")
+        except FileNotFoundError:
+            resolution["needs_llm"] = True
+            resolution["reason"] = "latest_per_group_cards_missing"
+            meta.setdefault("reason", resolution["reason"])
+            return resolution, None
+        except Exception:
+            resolution["needs_llm"] = True
+            resolution["reason"] = "latest_per_group_cards_missing"
+            meta.setdefault("reason", resolution["reason"])
+            return resolution, None
+
+        col_url = _find_column_name(card_product_url, "url")
+        col_seen_at = _find_column_name(card_product_url, "seen_at")
+        col_style_fk = _find_column_name(card_product_url, "style_id")
+        col_is_current = _find_column_name(card_product_url, "is_current") or "is_current"
+        col_style_id = _find_column_name(card_style, "id")
+        col_style_brand_fk = _find_column_name(card_style, "brand_id")
+        col_brand_id = _find_column_name(card_brand, "id")
+        col_brand_name = _find_column_name(card_brand, "name")
+
+        required_cols = [col_url, col_seen_at, col_style_fk, col_style_id, col_style_brand_fk, col_brand_id, col_brand_name]
+        if any(value is None for value in required_cols):
+            resolution["needs_llm"] = True
+            resolution["reason"] = "latest_per_group_columns_missing"
+            meta.setdefault("reason", resolution["reason"])
+            return resolution, None
+
+        k_value = max(1, min(k_value, 20))
+        rows, timing, sql_text = _run_latest_urls_per_brand(
+            k_value,
+            {
+                "url": col_url,
+                "seen_at": col_seen_at,
+                "style_fk": col_style_fk,
+                "is_current": col_is_current,
+                "style_id": col_style_id,
+                "style_brand_fk": col_style_brand_fk,
+                "brand_id": col_brand_id,
+                "brand_name": col_brand_name,
+            },
+        )
+
+        meta.update(
+            {
+                "intent": "latest_per_group",
+                "catalog_ms": catalog_ms,
+                "catalog_ms_slim": catalog_ms,
+                "plan_ms": plan_ms,
+                "engine_ms": timing.get("engine_ms", 0),
+                "exec_ms": timing.get("exec_ms", 0),
+                "llm_ms": 0,
+                "k": k_value,
+                "used_path": _LATEST_TEMPLATE_PATH,
+                "handoff": False,
+                "handoff_reason": None,
+                "regenerated": False,
+                "allowed_tables": allowed_tables,
+                "reason": "latest_per_group",
+            }
+        )
+
+        execution = {
+            "rows": rows,
+            "row_count": len(rows),
+            "dry_run": False,
+            "success": True,
+            "meta": timing,
+        }
+
+        result = {
+            "answer": rows,
+            "sql": sql_text,
+            "meta": meta,
+            "execution": execution,
+        }
+        return resolution, result
 
     def _has_clear_lead() -> bool:
         if not candidates:
@@ -547,7 +699,19 @@ def plan_sql(
                 allowed_columns.add(("", table, name))
                 allowed_columns.add((None, None, name))
 
-    allowed_table_meta = sorted(set(allowed_table_names)) if allowed_table_names else None
+    if allowed_table_names:
+        ordered_unique: List[str] = []
+        for name in allowed_table_names:
+            if name not in ordered_unique:
+                ordered_unique.append(name)
+        allowed_table_meta = ordered_unique
+    else:
+        allowed_table_meta = None
+
+    if allowed_table_meta and {"public.product_url", "public.style", "public.brand"}.issubset(set(allowed_table_meta)):
+        user_blocks.append(
+            "Join product_url→style→brand (pu.style_id = s.id, s.brand_id = b.id). Use pu.seen_at to rank latest and return the latest 5 per brand: brand, url, seen_at."
+        )
 
     base_user_blocks = list(user_blocks)
 

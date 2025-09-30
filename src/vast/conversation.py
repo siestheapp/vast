@@ -772,10 +772,29 @@ Remember: You are VAST, with direct database access. Current context:
             if not action.get("success"):
                 continue
             action_type = action.get("type")
-            if action_type in {"dml", "read", "explain", "sql_query"}:
-                if action_type == "explain":
-                    return "Here’s the query plan. See the table below."
-                return "Done. Results are below."
+            if action_type not in {"dml", "read", "explain", "sql_query"}:
+                continue
+
+            rows = action.get("rows") or []
+            row_count = (
+                action.get("row_count")
+                if isinstance(action.get("row_count"), int)
+                else action.get("count")
+            )
+            if row_count is None and isinstance(rows, list):
+                row_count = len(rows)
+
+            has_rows = bool(row_count and row_count > 0) or (isinstance(rows, list) and len(rows) > 0)
+            if not has_rows:
+                continue
+
+            if action_type == "sql_query":
+                # sql_query is our read shorthand
+                action_type = "read"
+
+            if action_type == "explain":
+                return "Here’s the query plan. See the table below."
+            return "Done. Results are below."
         return ""
     
     def process(self, user_input: str, auto_execute: bool = False) -> str:
@@ -1104,11 +1123,8 @@ Remember: You are VAST, with direct database access. Current context:
                 response = compact_reply
 
         response = self._enforce_grounding(user_input, response)
-        assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)
-        self.messages.append(assistant_msg)
-
-        # Save session
-        self._save_session()
+        final_response = response
+        final_response_recorded = False
 
         # --- NEW: If auto_execute is on but nothing ran, plan+run a RO SELECT and answer.
         # We trigger when the reply contains the placeholder OR the input is a DB-fact question.
@@ -1183,11 +1199,11 @@ Remember: You are VAST, with direct database access. Current context:
 
                     # Render compact answer
                     if row_count == 0:
-                        final = "No rows."
+                        final_response = "No rows."
                     elif row_count == 1 and isinstance(rows[0], dict) and len(rows[0]) == 1:
                         # Single cell → say it plainly
                         k, v = next(iter(rows[0].items()))
-                        final = f"**{k}**: {v}"
+                        final_response = f"**{k}**: {v}"
                     else:
                         # Small markdown table
                         cols = list(rows[0].keys()) if rows and isinstance(rows[0], dict) else []
@@ -1199,27 +1215,30 @@ Remember: You are VAST, with direct database access. Current context:
                             for r in rows[:10]:
                                 lines.append("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
                             suffix = "" if row_count <= 10 else f"\n_{row_count-10} more row(s) not shown_"
-                            final = "\n".join(lines) + suffix
+                            final_response = "\n".join(lines) + suffix
                         else:
-                            final = f"Returned {row_count} row(s)."
-
-                    # Replace placeholder with actual answer
-                    assistant_msg = Message(role=MessageRole.ASSISTANT, content=final)
-                    self.messages.append(assistant_msg)
-                    self._save_session()
-                    return final
+                            final_response = f"Returned {row_count} row(s)."
+                    final_response_recorded = True
                 except Exception as exc:
-                    err = f"Query planning/execution failed: {exc}"
+                    final_response = f"Query planning/execution failed: {exc}"
                     self.last_response_meta = {
                         "intent": "unknown",
                         "error": str(exc),
                     }
-                    assistant_msg = Message(role=MessageRole.ASSISTANT, content=err)
-                    self.messages.append(assistant_msg)
-                    self._save_session()
-                    return err
+                    final_response_recorded = True
 
-        return response
+        if not final_response_recorded:
+            # Attach compact acknowledgement if we have grounded actions
+            compact = self._compose_read_reply(self.last_actions)
+            if compact:
+                final_response = compact
+
+        assistant_msg = Message(role=MessageRole.ASSISTANT, content=final_response)
+        self.messages.append(assistant_msg)
+
+        # Save session
+        self._save_session()
+        return final_response
     
     def _extract_code_blocks(self, text: str, lang_hint: str | None = None) -> Dict[str, List[str]] | List[str]:
         """Extract SQL and system command blocks from the response"""

@@ -278,9 +278,22 @@ const sendChat = async () => {
       ? data.response
       : (data.response ? String(data.response) : '');
     const showWriteChecklist = chatWriteChecklist ? chatWriteChecklist.isWriteLike(data) : false;
-    const responseText = chatWriteChecklist
+    let responseText = chatWriteChecklist
       ? chatWriteChecklist.applyWriteChecklistGate(rawResponse, data)
       : rawResponse;
+    if (data && data.execution) {
+      const execRows = Array.isArray(data.execution.rows) ? data.execution.rows : [];
+      const execRowCount = typeof data.execution.row_count === 'number' ? data.execution.row_count : execRows.length;
+      const kind = (data.execution.stmt_kind || '').toUpperCase();
+      if ((execRowCount > 0 || execRows.length > 0) && typeof responseText === 'string') {
+        const trimmed = responseText.trim();
+        if (trimmed.toLowerCase() === 'no rows.') {
+          responseText = kind === 'EXPLAIN'
+            ? "Here’s the query plan. See the table below."
+            : "Done. Results are below.";
+        }
+      }
+    }
     const bubble = renderAssistant(responseText);
     decorateAssistantBubble(bubble, data, { showWriteChecklist });
     if (lastResponse) {

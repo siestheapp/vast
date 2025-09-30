@@ -202,11 +202,29 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
         
         console.print("[green]✓ VAST initialized with current database context[/]")
     
+    def _atomic_write(self, path: Path, text: str) -> None:
+        """Write a file atomically to avoid partial/corrupt JSON on crashes."""
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+
     def _load_session(self):
-        """Load an existing conversation from disk"""
-        with open(self.session_file, 'r') as f:
-            data = json.load(f)
-        
+        """Load an existing conversation from disk; recover from corruption."""
+        try:
+            with open(self.session_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as exc:
+            # Backup corrupt file and start fresh
+            try:
+                backup = self.session_file.with_suffix(self.session_file.suffix + ".corrupt")
+                self.session_file.rename(backup)
+                console.print(f"[yellow]Corrupt session file detected; backed up to {backup} and reinitializing.[/]")
+            except Exception:
+                console.print("[yellow]Corrupt session file detected; reinitializing session.[/]")
+            self._initialize_session()
+            return
+
         self.messages = [Message.from_dict(m) for m in data["messages"]]
         self.context = ConversationContext.from_dict(data["context"])
         
@@ -225,8 +243,8 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
             "last_updated": datetime.now().isoformat()
         }
         
-        with open(self.session_file, 'w') as f:
-            json.dump(data, f, indent=2)
+        # Write atomically to prevent partial writes
+        self._atomic_write(self.session_file, json.dumps(data, indent=2))
     
     def _refresh_schema_context(self):
         """Update context when database schema changes"""

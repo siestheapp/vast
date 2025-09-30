@@ -84,15 +84,16 @@
   };
 
   const buildCellHtml = (value) => {
-    if (!value) {
+    if (value === null || value === undefined || value === '') {
       return '<td></td>';
     }
-    if (URL_PATTERN.test(value)) {
-      const safeHref = escapeAttr(value);
-      const safeText = escapeHtml(value);
-      return `<td><a href="${safeHref}" target="_blank" rel="noopener">${safeText}</a></td>`;
+    const stringValue = String(value);
+    if (URL_PATTERN.test(stringValue)) {
+      const safeHref = escapeAttr(stringValue);
+      const safeText = escapeHtml(stringValue);
+      return `<td><a href="${safeHref}" target="_blank" rel="noopener noreferrer">${safeText}</a></td>`;
     }
-    return `<td>${escapeHtml(value)}</td>`;
+    return `<td>${escapeHtml(stringValue)}</td>`;
   };
 
   const buildTableHtml = (columns, rows) => {

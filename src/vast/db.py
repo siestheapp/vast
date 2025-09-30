@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Tuple, Set
@@ -359,6 +360,9 @@ def safe_execute(
                 "stmt_kind": sql_kind,
                 "write": sql_kind not in {"SELECT", "EXPLAIN"},
                 "dry_run": False,
+                "exec_ms": 0,
+                "engine_ms": 0,
+                "meta": {"engine_ms": 0, "exec_ms": 0},
             }
 
         if stmt_type is StatementType.WRITE:
@@ -388,6 +392,7 @@ def safe_execute(
 
             # Execute with RW engine only when truly writing
             with get_engine(readonly=False).begin() as conn:
+                start = time.perf_counter()
                 res = conn.execute(text(normalized_sql), params or {})
                 rows, columns, row_count = _consume_result(res)
                 if sql_kind == "EXPLAIN":
@@ -399,20 +404,29 @@ def safe_execute(
                     "columns": columns,
                     "row_count": row_count,
                 })
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                payload["engine_ms"] = duration_ms
+                payload["exec_ms"] = duration_ms
+                payload["meta"] = {"engine_ms": duration_ms, "exec_ms": duration_ms}
         else:
             # READ path — strictly RO engine
             with get_ro_engine().begin() as conn:
+                start = time.perf_counter()
                 res = conn.execute(text(normalized_sql), params or {})
                 rows, columns, row_count = _consume_result(res)
                 if sql_kind == "EXPLAIN":
                     rows, columns = _normalize_explain_rows(rows, columns)
                     row_count = len(rows)
+                duration_ms = int((time.perf_counter() - start) * 1000)
                 payload = _build_payload()
                 payload.update({
                     "rows": rows,
                     "columns": columns,
                     "row_count": row_count,
                 })
+                payload["engine_ms"] = duration_ms
+                payload["exec_ms"] = duration_ms
+                payload["meta"] = {"engine_ms": duration_ms, "exec_ms": duration_ms}
 
         # after success
         audit_event({

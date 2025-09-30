@@ -26,6 +26,11 @@
   - New config and CLI diagnostics tests green.
 
 ## Recent Changes (Key PRs/Files)
+- **Desktop chat:** render SELECT results inline with a compact table and timings.
+  - `frontend/chat_select_renderer.js`
+  - `frontend/script.js`
+  - `frontend/styles.css`
+  - `tests/test_chat_select_renderer.py`
 - **Desktop chat:** gate the write checklist to DDL/DML replies using execution metadata.
   - `frontend/chat_write_checklist.js`
   - `frontend/script.js`

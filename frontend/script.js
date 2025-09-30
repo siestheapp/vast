@@ -6,6 +6,10 @@ const state = {
   }
 };
 
+const chatSelectRenderer = (typeof window !== 'undefined' && window.VASTChatSelectRenderer)
+  ? window.VASTChatSelectRenderer
+  : null;
+
 const chatWriteChecklist = (typeof window !== 'undefined' && window.VASTChatWriteChecklist)
   ? window.VASTChatWriteChecklist
   : null;
@@ -184,25 +188,40 @@ const decorateAssistantBubble = (bubble, payload, extras = {}) => {
     }
   }
   if (payload) {
-    renderReadResult(bubble, payload);
-    attachBreadcrumbChip(bubble, payload.breadcrumbs);
-    // Suppress an initial "No rows." placeholder if a read result actually has rows
-    try {
-      const content = bubble.querySelector('.content') || bubble;
-      const text = (content.textContent || '').trim().toLowerCase();
-      const exec = payload && payload.execution ? payload.execution : null;
-      const result = payload && payload.result ? payload.result : null;
-      const execRowsLen = Array.isArray(exec && exec.rows) ? exec.rows.length : 0;
-      const resultRowsLen = Array.isArray(result && result.rows) ? result.rows.length : 0;
-      const execCount = typeof (exec && exec.row_count) === 'number' ? exec.row_count : 0;
-      const resultCount = typeof (result && result.row_count) === 'number' ? result.row_count : 0;
-      const hasRows = (execRowsLen + resultRowsLen + execCount + resultCount) > 0;
-      const isRead = (payload && payload.intent === 'read') || (!!exec && !exec.write);
-      if (text === 'no rows.' && isRead && hasRows) {
-        content.innerHTML = '';
+    const content = bubble.querySelector('.content') || bubble;
+    let hasExecutionHtml = false;
+    if (content && chatSelectRenderer && typeof chatSelectRenderer.buildExecutionHtml === 'function') {
+      content.querySelectorAll('.result-execution').forEach((node) => node.remove());
+      const executionHtml = chatSelectRenderer.buildExecutionHtml(payload);
+      if (executionHtml) {
+        content.insertAdjacentHTML('afterbegin', executionHtml);
+        hasExecutionHtml = true;
       }
-    } catch (err) {
-      console.debug('no-rows suppression guard failed', err);
+    }
+
+    if (!hasExecutionHtml) {
+      renderReadResult(bubble, payload);
+    }
+    attachBreadcrumbChip(bubble, payload.breadcrumbs);
+
+    if (!hasExecutionHtml) {
+      // Suppress an initial "No rows." placeholder if a read result actually has rows
+      try {
+        const text = (content.textContent || '').trim().toLowerCase();
+        const exec = payload && payload.execution ? payload.execution : null;
+        const result = payload && payload.result ? payload.result : null;
+        const execRowsLen = Array.isArray(exec && exec.rows) ? exec.rows.length : 0;
+        const resultRowsLen = Array.isArray(result && result.rows) ? result.rows.length : 0;
+        const execCount = typeof (exec && exec.row_count) === 'number' ? exec.row_count : 0;
+        const resultCount = typeof (result && result.row_count) === 'number' ? result.row_count : 0;
+        const hasRows = (execRowsLen + resultRowsLen + execCount + resultCount) > 0;
+        const isRead = (payload && payload.intent === 'read') || (!!exec && !exec.write);
+        if (text === 'no rows.' && isRead && hasRows) {
+          content.innerHTML = '';
+        }
+      } catch (err) {
+        console.debug('no-rows suppression guard failed', err);
+      }
     }
   }
 };

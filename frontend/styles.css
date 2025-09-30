@@ -504,6 +504,19 @@ pre {
   font-size: 0.8rem;
   color: var(--color-text-muted);
 }
+.result-execution {
+  margin-bottom: 12px;
+}
+.result-scroll {
+  max-height: 260px;
+  overflow: auto;
+  margin-bottom: 6px;
+}
+.result-empty {
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  margin-top: 6px;
+}
 .result-notes {
   margin-top: 6px;
   padding-left: 18px;

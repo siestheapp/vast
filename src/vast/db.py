@@ -298,11 +298,17 @@ def safe_execute(
 
             # Execute with RW engine only when truly writing
             with get_engine(readonly=False).begin() as conn:
-                result = list(conn.execute(text(normalized_sql), params or {}))
+                res = conn.execute(text(normalized_sql), params or {})
+                # DML/DDL generally do not return rows; avoid fetching
+                if getattr(res, "returns_rows", False):
+                    result = list(res)
+                else:
+                    result = []
         else:
             # READ path — strictly RO engine
             with get_ro_engine().begin() as conn:
-                result = list(conn.execute(text(normalized_sql), params or {}))
+                res = conn.execute(text(normalized_sql), params or {})
+                result = list(res) if getattr(res, "returns_rows", False) else []
 
         # after success
         audit_event({
@@ -326,16 +332,28 @@ def is_select(sql: str) -> bool:
 
 
 def add_limit(sql: str, limit: int) -> str:
-    try:
-        expr = parse_one(sql, read="postgres")
-    except ParseError:
-        return sql
+    """Append a LIMIT clause when one is not present.
 
-    target = expr
-    while isinstance(target, exp.With):
-        target = target.this
+    The previous implementation attempted to mutate the sqlglot AST by setting a
+    Limit node directly. In some environments/versions this produced malformed SQL
+    where the numeric literal was concatenated to the preceding identifier (e.g.
+    "public.brand100 LIMIT;"), causing table names like "brand100". To keep
+    behaviour robust across sqlglot versions, fall back to a simple and safe
+    string-based append when a LIMIT token isn't already present.
+    """
 
-    if isinstance(target, (exp.Select, *SET_OPERATION_TYPES)) and not target.args.get("limit"):
-        target.set("limit", exp.Limit(this=exp.Literal.number(limit)))
-        return expr.sql(dialect="postgres")
-    return sql
+    original = sql or ""
+    stripped = original.strip()
+    if not stripped:
+        return original
+
+    # If any LIMIT appears, leave the statement unchanged
+    lower = stripped.lower()
+    if " limit " in f" {lower} ":
+        return original
+
+    # Preserve trailing semicolon if present
+    has_semicolon = stripped.endswith(";")
+    body = stripped[:-1] if has_semicolon else stripped
+    augmented = f"{body} LIMIT {int(limit)}"
+    return augmented + (";" if has_semicolon else "")

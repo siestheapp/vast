@@ -913,8 +913,52 @@ Remember: You are VAST, with direct database access. Current context:
             self._save_session()
             return response
 
-        # Get LLM response
-        response = self._get_llm_response(user_input)
+        # Deterministic resolver shortcut
+        resolver_meta = {}
+        shortcut_result = None
+        try:
+            resolution, shortcut = resolver_shortcut(user_input)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Resolver shortcut failed: %s", exc)
+            resolution, shortcut = None, None
+
+        if resolution:
+            resolver_meta = resolution.get("meta", {}) or {}
+
+        if shortcut:
+            shortcut_result = shortcut
+
+        llm_skipped = False
+
+        if shortcut_result and shortcut_result.get("sql"):
+            intent = shortcut_result.get("intent", "read")
+            exec_block = shortcut_result.get("execution", {})
+            rows = exec_block.get("rows", [])
+            row_count = exec_block.get("row_count")
+            if row_count is None and isinstance(rows, list):
+                row_count = len(rows)
+
+            # Apply read acknowledgement directly
+            if exec_block.get("stmt_kind", "").upper() == "EXPLAIN":
+                response = "Here’s the query plan. See the table below."
+            else:
+                response = "Done. Results are below."
+
+            meta_copy = dict(shortcut_result.get("meta") or {})
+            meta_copy.setdefault("resolver_hit", resolver_meta.get("used_path") or resolver_meta.get("reason") or intent)
+            meta_copy["llm_ms"] = 0
+            meta_copy["intent"] = intent
+            meta_copy.setdefault("catalog_ms", resolver_meta.get("catalog_ms", 0))
+            meta_copy.setdefault("plan_ms", resolver_meta.get("plan_ms", 0))
+            meta_copy.setdefault("engine_ms", exec_block.get("meta", {}).get("engine_ms", 0))
+            meta_copy.setdefault("exec_ms", exec_block.get("meta", {}).get("exec_ms", 0))
+
+            self.last_response_meta = meta_copy
+            self.last_actions.append(jsonable_encoder(exec_block | {"type": "read", "success": True, "rows": rows, "row_count": row_count}, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
+            llm_skipped = True
+        else:
+            # Get LLM response
+            response = self._get_llm_response(user_input)
 
         # Do not inject plan scaffold into the text here; the UI can render a scaffold
         # when explicitly requested via the ui_force_plan flag.

@@ -17,7 +17,7 @@ def test_cli_run_hydrates_limit(monkeypatch):
     def fake_safe_execute(sql, params=None, allow_writes=False, force_write=False):
         captured["sql"] = sql
         captured["params"] = params
-        return []
+        return {"rows": [], "columns": [], "row_count": 0, "dry_run": False}
 
     # Ensure CLI uses the same service module object we're patching
     monkeypatch.setattr(cli, "service", service, raising=False)

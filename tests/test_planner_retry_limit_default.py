@@ -12,7 +12,7 @@ def test_planner_normalizes_limit_literal(monkeypatch):
     def fake_safe_execute(sql, params=None, allow_writes=False, force_write=False):
         captured["sql"] = sql
         captured["params"] = params
-        return []
+        return {"rows": [], "columns": [], "row_count": 0, "dry_run": False}
 
     monkeypatch.setattr("src.vast.agent.plan_sql", fake_plan_sql)
     monkeypatch.setattr("src.vast.agent.safe_execute", fake_safe_execute)
@@ -37,7 +37,17 @@ def test_plan_and_execute_infers_limit_from_prompt(monkeypatch):
     def fake_execute_sql(sql, params=None, allow_writes=False, force_write=False):
         captured["sql"] = sql
         captured["params"] = params
-        return {"rows": [], "row_count": 0, "dry_run": False}
+        return {
+            "rows": [],
+            "columns": [],
+            "row_count": 0,
+            "dry_run": False,
+            "stmt_kind": "SELECT",
+            "write": False,
+            "meta": {"engine_ms": 0, "exec_ms": 0},
+            "exec_ms": 0,
+            "engine_ms": 0,
+        }
 
     monkeypatch.setattr("src.vast.service.plan_sql_with_retry", fake_plan_sql_with_retry)
     monkeypatch.setattr("src.vast.service.execute_sql", fake_execute_sql)

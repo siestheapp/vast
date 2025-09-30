@@ -10,7 +10,7 @@ def test_strict_unknown_column_no_execute(monkeypatch):
     def fake_safe_execute(*args, **kwargs):
         nonlocal called
         called = True
-        return []
+        return {"rows": [], "columns": [], "row_count": 0, "dry_run": False}
 
     monkeypatch.setattr("src.vast.service.safe_execute", fake_safe_execute)
 
@@ -29,7 +29,7 @@ def test_strict_unknown_table_no_execute(monkeypatch):
     def fake_safe_execute(*args, **kwargs):
         nonlocal called
         called = True
-        return []
+        return {"rows": [], "columns": [], "row_count": 0, "dry_run": False}
 
     monkeypatch.setattr("src.vast.service.safe_execute", fake_safe_execute)
 
@@ -47,7 +47,7 @@ def test_strict_allows_system_schema_reads(monkeypatch):
 
     def fake_safe_execute(sql, params=None, allow_writes=False, force_write=False):
         calls.append(sql)
-        return []
+        return {"rows": [], "columns": [], "row_count": 0, "dry_run": False}
 
     monkeypatch.setattr("src.vast.service.safe_execute", fake_safe_execute)
 

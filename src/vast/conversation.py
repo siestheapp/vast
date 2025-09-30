@@ -563,17 +563,21 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
                     }
             else:
                 # DML operations (SELECT, INSERT, UPDATE)
-                rows = safe_execute(
+                execution = safe_execute(
                     executed_sql,
                     params=params_for_sql,
                     allow_writes=True,
                     force_write=True,
                 )
+                rows = execution.get("rows", []) if isinstance(execution, dict) else execution
+                columns = execution.get("columns", []) if isinstance(execution, dict) else []
+                count = execution.get("row_count") if isinstance(execution, dict) else None
                 return {
                     "success": True,
                     "type": "dml",
                     "rows": rows,
-                    "count": len(rows) if isinstance(rows, list) else 0,
+                    "columns": columns,
+                    "count": count if isinstance(count, int) else (len(rows) if isinstance(rows, list) else 0),
                     "sql": executed_sql,
                     "replanned": replanned,
                 }

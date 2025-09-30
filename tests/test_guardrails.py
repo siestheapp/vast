@@ -20,7 +20,8 @@ def test_write_requires_flag():
 
 def test_dry_run_when_not_forced():
     out = safe_execute("UPDATE actor SET first_name='test' WHERE actor_id < 10", allow_writes=True, force_write=False)
-    assert out and out[0]["_notice"].startswith("DRY RUN")
+    assert out["dry_run"] is True
+    assert out["rows"][0]["_notice"].startswith("DRY RUN")
 
 def test_row_estimate_gate(monkeypatch):
     # Simulate a huge estimate by monkeypatching _estimate_write_rows

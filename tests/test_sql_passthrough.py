@@ -39,7 +39,12 @@ def test_accepts_valid_sql_passthrough(monkeypatch):
         return {
             "rows": [{"title": "A Film"}],
             "row_count": 1,
+            "columns": ["title"],
+            "stmt_kind": "SELECT",
+            "write": False,
             "meta": {"engine_ms": 5, "exec_ms": 7},
+            "exec_ms": 7,
+            "engine_ms": 5,
         }
 
     monkeypatch.setattr(service, "ensure_valid_identifiers", fake_ensure)
@@ -67,7 +72,12 @@ def test_planner_for_nl_text(monkeypatch):
         return {
             "rows": [{"title": "A Film", "url": "http://example.com"}],
             "row_count": 1,
+            "columns": ["title", "url"],
+            "stmt_kind": "SELECT",
+            "write": False,
             "meta": {"engine_ms": 4, "exec_ms": 6},
+            "exec_ms": 6,
+            "engine_ms": 4,
         }
 
     monkeypatch.setattr(service, "plan_sql_with_retry", fake_plan)
@@ -92,7 +102,16 @@ def test_plan_and_execute_write_intent(monkeypatch):
     def fake_execute_sql(sql, allow_writes=False, force_write=False, **_):
         executed["called"] = True
         executed["allow_writes"] = allow_writes
-        return {"rows": [], "meta": {"engine_ms": 5, "exec_ms": 5}}
+        return {
+            "rows": [],
+            "columns": [],
+            "row_count": 0,
+            "stmt_kind": "UPDATE",
+            "write": True,
+            "meta": {"engine_ms": 5, "exec_ms": 5},
+            "exec_ms": 5,
+            "engine_ms": 5,
+        }
 
     monkeypatch.setattr(service, "plan_sql_with_retry", fake_plan)
     monkeypatch.setattr(service, "execute_sql", fake_execute_sql)
@@ -121,7 +140,12 @@ def test_plan_and_execute_read_payload_details(monkeypatch):
                 {"url": "http://example.com/two", "seen_at": "2024-01-02T00:00:00"},
             ],
             "row_count": 2,
+            "columns": ["url", "seen_at"],
+            "stmt_kind": "SELECT",
+            "write": False,
             "meta": {"engine_ms": 3, "exec_ms": 5},
+            "exec_ms": 5,
+            "engine_ms": 3,
         }
 
     monkeypatch.setattr(service, "ensure_valid_identifiers", fake_ensure)

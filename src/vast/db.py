@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -11,6 +12,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from .config import settings, write_url, read_url
+from .sql_params import stmt_kind
 from .audit import audit_event
 
 
@@ -251,6 +253,72 @@ def _estimate_write_rows(sql: str, params: dict | None) -> Optional[int]:
             return None
 
 
+def _consume_result(res) -> Tuple[List[Dict[str, Any]], List[str], int]:
+    """Materialise a SQLAlchemy result into plain rows/columns."""
+
+    rows: List[Dict[str, Any]] = []
+    columns: List[str] = []
+    row_count = 0
+
+    if getattr(res, "returns_rows", False):
+        try:
+            mappings = res.mappings().all()
+            rows = [dict(row) for row in mappings]
+        except Exception:
+            fetched = res.fetchall()
+            rows = []
+            for row in fetched:
+                mapping = getattr(row, "_mapping", None)
+                if mapping is not None:
+                    rows.append(dict(mapping))
+                elif isinstance(row, dict):
+                    rows.append(dict(row))
+                else:
+                    try:
+                        rows.append(dict(row))
+                    except Exception:
+                        rows.append({"value": row})
+        try:
+            columns = list(res.keys())
+        except Exception:
+            if rows:
+                columns = list(rows[0].keys())
+        row_count = len(rows)
+    else:
+        try:
+            row_count = int(res.rowcount)
+        except Exception:
+            row_count = 0
+        if row_count < 0:
+            row_count = 0
+
+    return rows, columns, row_count
+
+
+def _normalize_explain_rows(
+    rows: List[Dict[str, Any]],
+    columns: List[str],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    if not rows:
+        return rows, ["plan"]
+
+    normalized: List[Dict[str, Any]] = []
+    for row in rows:
+        value: Any = row
+        if isinstance(row, dict):
+            if len(row) == 1:
+                value = next(iter(row.values()))
+            else:
+                value = row
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                value = value.strip()
+        normalized.append({"plan": value})
+    return normalized, ["plan"]
+
+
 def safe_execute(
     sql: str,
     params: dict | None = None,
@@ -270,6 +338,8 @@ def safe_execute(
     if stmt_type is StatementType.DDL:
         raise ValueError("DDL statements are blocked. Use a migration workflow.")
 
+    sql_kind = stmt_kind(normalized_sql)
+
     try:
         # before
         audit_event({
@@ -280,6 +350,16 @@ def safe_execute(
             "allow_writes": allow_writes,
             "force_write": force_write,
         })
+
+        def _build_payload() -> Dict[str, Any]:
+            return {
+                "rows": [],
+                "columns": [],
+                "row_count": 0,
+                "stmt_kind": sql_kind,
+                "write": sql_kind not in {"SELECT", "EXPLAIN"},
+                "dry_run": False,
+            }
 
         if stmt_type is StatementType.WRITE:
             if not allow_writes:
@@ -294,38 +374,53 @@ def safe_execute(
 
             if not force_write:
                 audit_event({"phase": "dry_run", "estimated_rows": est})
-                return [{"_notice": "DRY RUN — not executed", "_sql": normalized_sql, "_params": params or {}, "_estimated_rows": est}]
+                notice = {
+                    "_notice": "DRY RUN — not executed",
+                    "_sql": normalized_sql,
+                    "_params": params or {},
+                    "_estimated_rows": est,
+                }
+                payload = _build_payload()
+                payload["rows"] = [notice]
+                payload["columns"] = list(notice.keys())
+                payload["dry_run"] = True
+                return payload
 
             # Execute with RW engine only when truly writing
             with get_engine(readonly=False).begin() as conn:
                 res = conn.execute(text(normalized_sql), params or {})
-                # DML often has RETURNING; fetch only when rows are present
-                if getattr(res, "returns_rows", False):
-                    try:
-                        result = list(res.mappings().all())
-                    except Exception:
-                        result = list(res)
-                else:
-                    result = []
+                rows, columns, row_count = _consume_result(res)
+                if sql_kind == "EXPLAIN":
+                    rows, columns = _normalize_explain_rows(rows, columns)
+                    row_count = len(rows)
+                payload = _build_payload()
+                payload.update({
+                    "rows": rows,
+                    "columns": columns,
+                    "row_count": row_count,
+                })
         else:
             # READ path — strictly RO engine
             with get_ro_engine().begin() as conn:
                 res = conn.execute(text(normalized_sql), params or {})
-                if getattr(res, "returns_rows", False):
-                    try:
-                        result = list(res.mappings().all())
-                    except Exception:
-                        result = list(res)
-                else:
-                    result = []
+                rows, columns, row_count = _consume_result(res)
+                if sql_kind == "EXPLAIN":
+                    rows, columns = _normalize_explain_rows(rows, columns)
+                    row_count = len(rows)
+                payload = _build_payload()
+                payload.update({
+                    "rows": rows,
+                    "columns": columns,
+                    "row_count": row_count,
+                })
 
         # after success
         audit_event({
             "phase": "post",
             "success": True,
-            "rows": len(result) if isinstance(result, list) else None,
+            "rows": payload.get("row_count"),
         })
-        return result
+        return payload
     except Exception as exc:
         audit_event({
             "phase": "post",

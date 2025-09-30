@@ -268,12 +268,18 @@ def resolver_shortcut(
             }
         )
 
+        columns = list(rows[0].keys()) if rows else []
         execution = {
             "rows": rows,
+            "columns": columns,
             "row_count": len(rows),
             "dry_run": False,
             "success": True,
             "meta": timing,
+            "stmt_kind": "SELECT",
+            "write": False,
+            "exec_ms": timing.get("exec_ms"),
+            "engine_ms": timing.get("engine_ms"),
         }
 
         result = {

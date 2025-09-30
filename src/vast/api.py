@@ -62,6 +62,15 @@ def _json_safe(value):
         return str(value)
 
 
+CUSTOM_ENCODERS = {
+    datetime: lambda x: x.isoformat(),
+    date: lambda x: x.isoformat(),
+    Decimal: float,
+    uuid.UUID: str,
+    Path: str,
+}
+
+
 class RunSQLRequest(BaseModel):
     sql: str
     params: Dict[str, Any] = Field(default_factory=dict)

@@ -460,23 +460,32 @@ def execute_sql(
         requested=requested,
     )
     exec_start = time.perf_counter()
-    rows = safe_execute(
+    execution = safe_execute(
         normalized_sql,
         params=hydrated_params or {},
         allow_writes=allow_writes,
         force_write=force_write,
     )
     exec_ms = int((time.perf_counter() - exec_start) * 1000)
+    rows = execution.get("rows", []) if isinstance(execution, dict) else []
     serialised, dry_run = _serialize_rows(rows)
-    return {
-        "rows": serialised,
-        "row_count": 0 if dry_run else len(serialised),
-        "dry_run": dry_run,
-        "meta": {
-            "engine_ms": engine_ms,
-            "exec_ms": exec_ms,
-        },
+    result = dict(execution) if isinstance(execution, dict) else {}
+    result["rows"] = serialised
+    result["dry_run"] = dry_run or result.get("dry_run", False)
+    if result["dry_run"]:
+        result["row_count"] = 0
+    else:
+        result["row_count"] = result.get("row_count", len(serialised))
+    result.setdefault("columns", [])
+    result.setdefault("stmt_kind", sql_kind)
+    result.setdefault("write", sql_kind not in {"SELECT", "EXPLAIN"})
+    result["exec_ms"] = exec_ms
+    result["engine_ms"] = engine_ms
+    result["meta"] = {
+        "engine_ms": engine_ms,
+        "exec_ms": exec_ms,
     }
+    return result
 
 
 def plan_and_execute(

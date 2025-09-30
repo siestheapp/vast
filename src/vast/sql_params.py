@@ -98,7 +98,12 @@ def stmt_kind(sql: str) -> str:
     if not sql:
         return "OTHER"
 
-    match = re.match(r"\s*(\w+)", sql)
+    sql_str = sql.strip()
+    upper = sql_str.upper()
+    if upper.startswith("EXPLAIN"):
+        return "EXPLAIN"
+
+    match = re.match(r"\s*(\w+)", sql_str)
     if not match:
         return "OTHER"
 

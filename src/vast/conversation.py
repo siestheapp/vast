@@ -40,7 +40,7 @@ from .identifier_guard import (
     format_identifier_error,
     extract_requested_identifiers,
 )
-from .sql_params import hydrate_readonly_params, normalize_limit_literal
+from .sql_params import hydrate_readonly_params, normalize_limit_literal, stmt_kind
 from .settings import STRICT_IDENTIFIER_MODE
 from fastapi.encoders import jsonable_encoder
 
@@ -488,11 +488,12 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
 
             operation = re.match(r"^\s*([A-Za-z]+)", executed_sql or "")
             op = operation.group(1).upper() if operation else ""
-            allow_writes = op in {"INSERT", "UPDATE"}
+            sql_kind = stmt_kind(executed_sql)
+            allow_writes = sql_kind == "DML"
 
-            if op in {"SELECT", "INSERT", "UPDATE"} and not allow_ddl:
+            if sql_kind in {"SELECT", "DML"} and not allow_ddl:
                 executed_sql = normalize_limit_literal(executed_sql, None)
-                if op == "SELECT":
+                if sql_kind == "SELECT":
                     params_for_sql = hydrate_readonly_params(executed_sql, None)
                 requested = extract_requested_identifiers(executed_sql)
 
@@ -583,21 +584,22 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
             else:
                 # DML operations (SELECT, INSERT, UPDATE)
                 # Optional polish: if this is EXPLAIN, prefer JSON format for primitive output
-                if op == "EXPLAIN" and "FORMAT" not in executed_sql.upper():
+                if sql_kind == "EXPLAIN" and "FORMAT" not in executed_sql.upper():
                     rest = executed_sql[len("EXPLAIN "):]
                     executed_sql = f"EXPLAIN (FORMAT JSON) {rest}"
                 execution = safe_execute(
                     executed_sql,
                     params=params_for_sql,
-                    allow_writes=True,
+                    allow_writes=allow_writes,
                     force_write=True,
                 )
                 rows = execution.get("rows", []) if isinstance(execution, dict) else execution
                 columns = execution.get("columns", []) if isinstance(execution, dict) else []
                 count = execution.get("row_count") if isinstance(execution, dict) else None
+                action_type = "dml" if allow_writes else ("explain" if sql_kind == "EXPLAIN" else "read")
                 return {
                     "success": True,
-                    "type": "dml",
+                    "type": action_type,
                     "rows": rows,
                     "columns": columns,
                     "count": count if isinstance(count, int) else (len(rows) if isinstance(rows, list) else 0),
@@ -930,7 +932,10 @@ Remember: You are VAST, with direct database access. Current context:
                     # Auto-execute read-only (e.g., SELECT, EXPLAIN, SHOW)
                     result = self._execute_sql(normalized, allow_ddl=False, user_input=user_input)
                     # Record as a SQL query (read) action for grounding detection
-                    self.last_actions.append(jsonable_encoder(result | {"type": "sql_query"}, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
+                    action_log = dict(result)
+                    if action_log.get("type") in {None, "dml"}:
+                        action_log["type"] = "sql_query"
+                    self.last_actions.append(jsonable_encoder(action_log, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
                     if result.get("success"):
                         # Store up to 10 rows in conversation log for provenance
                         if "rows" in result and result["rows"]:
@@ -1509,7 +1514,7 @@ Remember: You are VAST, with direct database access. Current context:
     def _grounding_evidence_present_this_turn(self) -> bool:
         # Minimal: if any of our grounded helpers ran, we would have pushed an action
         # or you can track a flag when you call get_engine/execute in this turn.
-        return any(a.get("type") in {"sql_query","health_report","biggest_tables","db_identity","table_count"}
+        return any(a.get("type") in {"sql_query","read","explain","health_report","biggest_tables","db_identity","table_count"}
                    for a in (self.last_actions or []))
 
     def _enforce_grounding(self, user_input: str, response: str) -> str:

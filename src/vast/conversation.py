@@ -252,9 +252,18 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
             "context": self.context.to_dict(),
             "last_updated": datetime.now().isoformat()
         }
-        
+        # Normalize entire payload to JSON-safe structure
+        CUSTOM_ENCODERS = {
+            datetime: lambda x: x.isoformat(),
+            date: lambda x: x.isoformat(),
+            Decimal: float,
+            uuid.UUID: str,
+            Path: str,
+        }
+        safe = jsonable_encoder(data, custom_encoder=CUSTOM_ENCODERS)
+
         # Write atomically to prevent partial writes
-        self._atomic_write(self.session_file, json.dumps(data, indent=2))
+        self._atomic_write(self.session_file, json.dumps(safe, indent=2))
     
     def _refresh_schema_context(self):
         """Update context when database schema changes"""

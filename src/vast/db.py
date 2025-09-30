@@ -299,16 +299,25 @@ def safe_execute(
             # Execute with RW engine only when truly writing
             with get_engine(readonly=False).begin() as conn:
                 res = conn.execute(text(normalized_sql), params or {})
-                # DML/DDL generally do not return rows; avoid fetching
+                # DML often has RETURNING; fetch only when rows are present
                 if getattr(res, "returns_rows", False):
-                    result = list(res)
+                    try:
+                        result = list(res.mappings().all())
+                    except Exception:
+                        result = list(res)
                 else:
                     result = []
         else:
             # READ path — strictly RO engine
             with get_ro_engine().begin() as conn:
                 res = conn.execute(text(normalized_sql), params or {})
-                result = list(res) if getattr(res, "returns_rows", False) else []
+                if getattr(res, "returns_rows", False):
+                    try:
+                        result = list(res.mappings().all())
+                    except Exception:
+                        result = list(res)
+                else:
+                    result = []
 
         # after success
         audit_event({

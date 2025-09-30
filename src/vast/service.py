@@ -23,7 +23,7 @@ from .agent import (
     resolver_shortcut,
 )
 from .config import settings
-from .db import get_engine, get_ro_engine, is_select
+from .db import get_engine, get_ro_engine, is_select, analyze_sql, StatementType
 from .catalog_pg import load_card
 from .introspect import list_tables, table_columns
 from .identifier_guard import extract_requested_identifiers
@@ -116,15 +116,27 @@ def looks_like_sql(text: str | None) -> bool:
 
 
 def _intent_from_sql(sql_text: str | None) -> str | None:
-    """Best effort classification of statement intent (read/write)."""
+    """Best effort classification of statement intent (read/write).
+
+    Treat EXPLAIN/SHOW and similar as read. DDL falls back to write for UI gating.
+    """
 
     if not sql_text or not sql_text.strip():
         return None
     try:
-        return "read" if is_select(sql_text) else "write"
+        analysis = analyze_sql(sql_text)
+        if analysis.statement_type is StatementType.READ:
+            return "read"
+        if analysis.is_select:
+            return "read"
+        return "write"
     except Exception:  # pragma: no cover - defensive
         logger.debug("Failed to classify SQL intent", exc_info=True)
-        return None
+        # Fallback to conservative gate using is_select
+        try:
+            return "read" if is_select(sql_text) else "write"
+        except Exception:
+            return None
 
 
 def _breadcrumbs_from_meta(meta: Dict[str, Any] | None, deterministic_hint: bool | None = None) -> Dict[str, Any] | None:

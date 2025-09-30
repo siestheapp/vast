@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Tuple, Set
+from uuid import UUID
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -254,6 +257,22 @@ def _estimate_write_rows(sql: str, params: dict | None) -> Optional[int]:
             return None
 
 
+def _coerce_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _coerce_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_coerce_value(v) for v in value]
+    return value
+
+
 def _consume_result(res) -> Tuple[List[Dict[str, Any]], List[str], int]:
     """Materialise a SQLAlchemy result into plain rows/columns."""
 
@@ -264,21 +283,21 @@ def _consume_result(res) -> Tuple[List[Dict[str, Any]], List[str], int]:
     if getattr(res, "returns_rows", False):
         try:
             mappings = res.mappings().all()
-            rows = [dict(row) for row in mappings]
+            rows = [{k: _coerce_value(v) for k, v in row.items()} for row in mappings]
         except Exception:
             fetched = res.fetchall()
             rows = []
             for row in fetched:
                 mapping = getattr(row, "_mapping", None)
                 if mapping is not None:
-                    rows.append(dict(mapping))
+                    rows.append({k: _coerce_value(v) for k, v in mapping.items()})
                 elif isinstance(row, dict):
-                    rows.append(dict(row))
+                    rows.append({k: _coerce_value(v) for k, v in row.items()})
                 else:
                     try:
-                        rows.append(dict(row))
+                        rows.append({k: _coerce_value(v) for k, v in dict(row).items()})
                     except Exception:
-                        rows.append({"value": row})
+                        rows.append({"value": _coerce_value(row)})
         try:
             columns = list(res.keys())
         except Exception:
@@ -316,7 +335,7 @@ def _normalize_explain_rows(
                 value = json.loads(value)
             except Exception:
                 value = value.strip()
-        normalized.append({"plan": value})
+        normalized.append({"plan": _coerce_value(value)})
     return normalized, ["plan"]
 
 

@@ -901,13 +901,15 @@ Remember: You are VAST, with direct database access. Current context:
                             serializable_rows = []
                             for row in result["rows"][:10]:
                                 try:
-                                    if hasattr(row, '_asdict'):
-                                        serializable_rows.append(row._asdict())
+                                    if isinstance(row, dict):
+                                        serializable_rows.append(row)
                                     elif hasattr(row, '_mapping'):
                                         serializable_rows.append(dict(row._mapping))
+                                    elif hasattr(row, '_asdict'):
+                                        serializable_rows.append(row._asdict())
                                     else:
-                                        serializable_rows.append(str(row))
-                                except:
+                                        serializable_rows.append(row)
+                                except Exception:
                                     serializable_rows.append(str(row))
                             result["rows"] = serializable_rows
                         exec_msg = Message(

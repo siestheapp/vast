@@ -109,6 +109,8 @@ def stmt_kind(sql: str) -> str:
         return "DML"
     if token in {"CALL", "DO"}:
         return "PROC"
+    if token in {"EXPLAIN"}:
+        return "EXPLAIN"
     if token in {"SELECT", "WITH"}:
         return "SELECT"
     return "OTHER"

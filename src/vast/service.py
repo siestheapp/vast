@@ -431,9 +431,12 @@ def execute_sql(
     """Run SQL with guardrails and return structured output."""
     params_with_hint = _apply_limit_hint(sql, sql, params)
     normalized_sql = normalize_limit_literal(sql, params_with_hint)
+    # If this is an EXPLAIN, prefer JSON format for primitive results
+    if stmt_kind(normalized_sql) == "EXPLAIN" and "FORMAT" not in normalized_sql.upper():
+        normalized_sql = f"EXPLAIN (FORMAT JSON) {normalized_sql[len('EXPLAIN '):]}"
     hydrated_params = hydrate_readonly_params(normalized_sql, params_with_hint)
     sql_kind = stmt_kind(normalized_sql)
-    if not allow_writes and sql_kind != "SELECT":
+    if not allow_writes and sql_kind not in {"SELECT", "EXPLAIN"}:
         keyword = normalized_sql.lstrip().split(None, 1)[0].upper() if (normalized_sql or "").strip() else ""
         raise ValueError(
             f"Read-only mode: expected a SELECT statement but received {keyword or 'non-SELECT SQL'}."

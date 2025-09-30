@@ -763,6 +763,18 @@ Remember: You are VAST, with direct database access. Current context:
                     "timeout_sec": timeout,
                 }
                 return OPS_PLAN_FALLBACK, audit
+
+    def _compose_read_reply(self, actions: list[dict]) -> str:
+        """Return a compact acknowledgement for successful read/explain actions."""
+        for action in reversed(actions or []):
+            if not action.get("success"):
+                continue
+            action_type = action.get("type")
+            if action_type in {"dml", "read", "explain", "sql_query"}:
+                if action_type == "explain":
+                    return "Here’s the query plan. See the table below."
+                return "Done. Results are below."
+        return ""
     
     def process(self, user_input: str, auto_execute: bool = False) -> str:
         """
@@ -1077,6 +1089,14 @@ Remember: You are VAST, with direct database access. Current context:
         # Optional: block hedgy language on DB facts
         if self._is_db_fact_question(user_input) and self._HEDGES.search(response or ""):
             response = response.replace("typically", "").replace("usually", "").replace("likely", "")
+
+        if any(
+            action.get("success") and action.get("type") in {"dml", "read", "explain", "sql_query"}
+            for action in self.last_actions
+        ):
+            compact_reply = self._compose_read_reply(self.last_actions)
+            if compact_reply:
+                response = compact_reply
 
         response = self._enforce_grounding(user_input, response)
         assistant_msg = Message(role=MessageRole.ASSISTANT, content=response)

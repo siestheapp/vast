@@ -26,6 +26,10 @@
   - New config and CLI diagnostics tests green.
 
 ## Recent Changes (Key PRs/Files)
+- **Desktop chat:** gate the write checklist to DDL/DML replies using execution metadata.
+  - `frontend/chat_write_checklist.js`
+  - `frontend/script.js`
+  - `tests/test_chat_write_checklist.py`
 - **Identifier guard:** allow safe reads from PostgreSQL system schemas while keeping write enforcement.
   - `src/vast/identifier_guard.py` (+ SYSTEM_SCHEMAS, _is_system_relation; strict-mode reads allowed)
   - `tests/test_identifier_strict.py`

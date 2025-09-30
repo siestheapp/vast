@@ -11,14 +11,18 @@ from typing import Any, Dict, Optional
 import json
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import service
 from .identifier_guard import IdentifierValidationError, format_identifier_error
 from api.routers import health as health_router
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
+from decimal import Decimal
+import uuid
 
 
 def _json_safe(value):
@@ -121,6 +125,15 @@ def create_app() -> FastAPI:
     # Lazy import VastConversation to speed up API startup/healthcheck
     conversations: Dict[str, Any] = {}
 
+    # Central JSON encoders for all responses
+    CUSTOM_ENCODERS = {
+        datetime: lambda x: x.isoformat(),
+        date: lambda x: x.isoformat(),
+        Decimal: float,
+        uuid.UUID: str,
+        Path: str,
+    }
+
     @app.get("/health")
     def health() -> Dict[str, Any]:
         return {
@@ -196,7 +209,7 @@ def create_app() -> FastAPI:
         return convo
 
     @app.post("/conversations/process")
-    def process_conversation(payload: ConversationProcessRequest) -> Dict[str, Any]:
+    def process_conversation(payload: ConversationProcessRequest):
         # Reuse or create a conversation instance for the session
         # Import here to avoid heavy module import during app startup
         from .conversation import VastConversation
@@ -207,22 +220,24 @@ def create_app() -> FastAPI:
         try:
             resp_text = conv.process(payload.message, auto_execute=payload.auto_execute)
             resp_meta = getattr(conv, "last_response_meta", None) or {}
-            return {
+            response_payload: Dict[str, Any] = {
                 "session": conv.session_name,
                 "response": resp_text,
-                "actions": _json_safe(conv.last_actions),
+                "actions": conv.last_actions,
                 "intent": resp_meta.get("intent"),
                 "sql": resp_meta.get("sql"),
-                "meta": _json_safe(resp_meta.get("meta")) if resp_meta.get("meta") is not None else None,
-                "execution": _json_safe(resp_meta.get("execution")) if resp_meta.get("execution") is not None else None,
-                "breadcrumbs": _json_safe(resp_meta.get("breadcrumbs")) if resp_meta.get("breadcrumbs") is not None else None,
-                "result": _json_safe(resp_meta.get("result")) if resp_meta.get("result") is not None else None,
-                "metrics": _json_safe(resp_meta.get("metrics")) if resp_meta.get("metrics") is not None else None,
-                "linkable_columns": _json_safe(resp_meta.get("linkable_columns")) if resp_meta.get("linkable_columns") is not None else None,
-                "notes": _json_safe(resp_meta.get("notes")) if resp_meta.get("notes") is not None else None,
+                "meta": resp_meta.get("meta"),
+                "execution": resp_meta.get("execution"),
+                "breadcrumbs": resp_meta.get("breadcrumbs"),
+                "result": resp_meta.get("result"),
+                "metrics": resp_meta.get("metrics"),
+                "linkable_columns": resp_meta.get("linkable_columns"),
+                "notes": resp_meta.get("notes"),
                 "ui_force_plan": bool(resp_meta.get("ui_force_plan")) if isinstance(resp_meta, dict) else False,
                 "error": resp_meta.get("error"),
             }
+            safe = jsonable_encoder(response_payload, custom_encoder=CUSTOM_ENCODERS)
+            return JSONResponse(content=safe)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

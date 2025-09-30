@@ -563,6 +563,10 @@ Tone: precise, confident, and free of pleasantries or invitations (no "let me kn
                     }
             else:
                 # DML operations (SELECT, INSERT, UPDATE)
+                # Optional polish: if this is EXPLAIN, prefer JSON format for primitive output
+                if op == "EXPLAIN" and "FORMAT" not in executed_sql.upper():
+                    rest = executed_sql[len("EXPLAIN "):]
+                    executed_sql = f"EXPLAIN (FORMAT JSON) {rest}"
                 execution = safe_execute(
                     executed_sql,
                     params=params_for_sql,

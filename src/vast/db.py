@@ -332,7 +332,17 @@ def safe_execute(
     - For writes, run EXPLAIN gate and block if estimate exceeds max_write_rows.
     - Reads use RO engine; actual write execution uses RW engine.
     """
-    analysis = analyze_sql(sql)
+    sql_stripped = sql.strip() if sql else ""
+    if sql_stripped.upper().startswith("EXPLAIN"):
+        analysis = SQLAnalysis(
+            statement_type=StatementType.READ,
+            normalized_sql=sql_stripped,
+            tables=set(),
+            columns=set(),
+            is_select=False,
+        )
+    else:
+        analysis = analyze_sql(sql)
     stmt_type = analysis.statement_type
     normalized_sql = analysis.normalized_sql
 

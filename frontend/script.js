@@ -138,25 +138,42 @@ const renderAssistant = (md) => {
   return last;
 };
 
-const attachBreadcrumbChip = (bubble, breadcrumbs) => {
-  if (!bubble || !breadcrumbs || typeof breadcrumbs !== 'object') return;
+const attachBreadcrumbChip = (bubble, breadcrumbs, meta = null) => {
+  if (!bubble) return;
   const content = bubble.querySelector('.content') || bubble;
   content.querySelectorAll('.breadcrumbs-chip').forEach((node) => node.remove());
-  const chip = document.createElement('div');
-  chip.className = 'breadcrumbs-chip';
-  const parts = [];
-  if (typeof breadcrumbs.deterministic === 'boolean') {
-    parts.push(breadcrumbs.deterministic ? 'Deterministic' : 'LLM');
+  const chipTexts = [];
+
+  if (breadcrumbs && typeof breadcrumbs === 'object') {
+    const parts = [];
+    if (typeof breadcrumbs.deterministic === 'boolean') {
+      parts.push(breadcrumbs.deterministic ? 'Deterministic' : 'LLM');
+    }
+    if (breadcrumbs.rule) {
+      parts.push(`rule=${breadcrumbs.rule}`);
+    }
+    if (typeof breadcrumbs.llm_ms === 'number') {
+      parts.push(`llm_ms=${breadcrumbs.llm_ms}`);
+    }
+    if (parts.length) {
+      chipTexts.push(parts.join(' • '));
+    }
   }
-  if (breadcrumbs.rule) {
-    parts.push(`rule=${breadcrumbs.rule}`);
+
+  if (meta && typeof meta === 'object') {
+    const resolverHit = meta.resolver_hit;
+    const llmMs = meta.llm_ms;
+    if (resolverHit && typeof resolverHit === 'string' && typeof llmMs === 'number' && llmMs === 0) {
+      chipTexts.push(`Deterministic: ${resolverHit} • llm_ms=0`);
+    }
   }
-  if (typeof breadcrumbs.llm_ms === 'number') {
-    parts.push(`llm_ms=${breadcrumbs.llm_ms}`);
-  }
-  if (!parts.length) return;
-  chip.textContent = parts.join(' • ');
-  content.appendChild(chip);
+
+  chipTexts.forEach((text) => {
+    const chip = document.createElement('div');
+    chip.className = 'breadcrumbs-chip';
+    chip.textContent = text;
+    content.appendChild(chip);
+  });
 };
 
 const renderReadResult = (bubble, payload) => {
@@ -202,7 +219,7 @@ const decorateAssistantBubble = (bubble, payload, extras = {}) => {
     if (!hasExecutionHtml) {
       renderReadResult(bubble, payload);
     }
-    attachBreadcrumbChip(bubble, payload.breadcrumbs);
+    attachBreadcrumbChip(bubble, payload.breadcrumbs, payload.meta);
 
     if (!hasExecutionHtml) {
       // Suppress an initial "No rows." placeholder if a read result actually has rows

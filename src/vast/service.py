@@ -469,6 +469,21 @@ def execute_sql(
     exec_ms = int((time.perf_counter() - exec_start) * 1000)
     rows = execution.get("rows", []) if isinstance(execution, dict) else []
     serialised, dry_run = _serialize_rows(rows)
+    # Optional polish: normalize EXPLAIN text into a single JSON 'plan' column
+    if sql_kind == "EXPLAIN" and serialised:
+        normalized = []
+        for row in serialised:
+            if isinstance(row, dict):
+                key = None
+                for k in row.keys():
+                    if str(k).strip().lower() == "query plan":
+                        key = k
+                        break
+                if key is not None:
+                    normalized.append({"plan": row.get(key)})
+                    continue
+            normalized.append(row)
+        serialised = normalized
     result = dict(execution) if isinstance(execution, dict) else {}
     result["rows"] = serialised
     result["dry_run"] = dry_run or result.get("dry_run", False)

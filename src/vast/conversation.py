@@ -12,7 +12,9 @@ import os
 import concurrent.futures
 import logging
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
+import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
@@ -40,6 +42,7 @@ from .identifier_guard import (
 )
 from .sql_params import hydrate_readonly_params, normalize_limit_literal
 from .settings import STRICT_IDENTIFIER_MODE
+from fastapi.encoders import jsonable_encoder
 
 # Ensure we can access the engine with fallback
 try:
@@ -68,11 +71,18 @@ class Message:
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self):
+        CUSTOM_ENCODERS = {
+            datetime: lambda x: x.isoformat(),
+            date: lambda x: x.isoformat(),
+            Decimal: float,
+            uuid.UUID: str,
+            Path: str,
+        }
         return {
             "role": self.role.value,
             "content": self.content,
             "timestamp": self.timestamp.isoformat(),
-            "metadata": self.metadata
+            "metadata": jsonable_encoder(self.metadata, custom_encoder=CUSTOM_ENCODERS),
         }
     
     @classmethod

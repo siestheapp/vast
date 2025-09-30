@@ -6,6 +6,10 @@ const state = {
   }
 };
 
+const chatWriteChecklist = (typeof window !== 'undefined' && window.VASTChatWriteChecklist)
+  ? window.VASTChatWriteChecklist
+  : null;
+
 const formatTime = (date = new Date()) =>
   date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -161,8 +165,9 @@ const renderReadResult = (bubble, payload) => {
   content.insertAdjacentHTML('beforeend', html);
 };
 
-const decorateAssistantBubble = (bubble, payload) => {
+const decorateAssistantBubble = (bubble, payload, extras = {}) => {
   if (!bubble) return;
+  const { showWriteChecklist } = extras;
   if (payload && payload.intent) {
     bubble.dataset.intent = payload.intent;
   }
@@ -171,9 +176,34 @@ const decorateAssistantBubble = (bubble, payload) => {
   } else if (bubble && bubble.dataset.uiForcePlan) {
     delete bubble.dataset.uiForcePlan;
   }
+  if (typeof showWriteChecklist === 'boolean') {
+    if (showWriteChecklist) {
+      bubble.dataset.writeChecklist = 'true';
+    } else if (bubble.dataset.writeChecklist) {
+      delete bubble.dataset.writeChecklist;
+    }
+  }
   if (payload) {
     renderReadResult(bubble, payload);
     attachBreadcrumbChip(bubble, payload.breadcrumbs);
+    // Suppress an initial "No rows." placeholder if a read result actually has rows
+    try {
+      const content = bubble.querySelector('.content') || bubble;
+      const text = (content.textContent || '').trim().toLowerCase();
+      const exec = payload && payload.execution ? payload.execution : null;
+      const result = payload && payload.result ? payload.result : null;
+      const execRowsLen = Array.isArray(exec && exec.rows) ? exec.rows.length : 0;
+      const resultRowsLen = Array.isArray(result && result.rows) ? result.rows.length : 0;
+      const execCount = typeof (exec && exec.row_count) === 'number' ? exec.row_count : 0;
+      const resultCount = typeof (result && result.row_count) === 'number' ? result.row_count : 0;
+      const hasRows = (execRowsLen + resultRowsLen + execCount + resultCount) > 0;
+      const isRead = (payload && payload.intent === 'read') || (!!exec && !exec.write);
+      if (text === 'no rows.' && isRead && hasRows) {
+        content.innerHTML = '';
+      }
+    } catch (err) {
+      console.debug('no-rows suppression guard failed', err);
+    }
   }
 };
 
@@ -208,8 +238,15 @@ const sendChat = async () => {
       body: JSON.stringify({ message: msg, auto_execute: true, allow_writes: false }),
     });
     hideTypingIndicator();
-    const bubble = renderAssistant(data.response || '');
-    decorateAssistantBubble(bubble, data);
+    const rawResponse = typeof data.response === 'string'
+      ? data.response
+      : (data.response ? String(data.response) : '');
+    const showWriteChecklist = chatWriteChecklist ? chatWriteChecklist.isWriteLike(data) : false;
+    const responseText = chatWriteChecklist
+      ? chatWriteChecklist.applyWriteChecklistGate(rawResponse, data)
+      : rawResponse;
+    const bubble = renderAssistant(responseText);
+    decorateAssistantBubble(bubble, data, { showWriteChecklist });
     if (lastResponse) {
       lastResponse.textContent = formatTime();
     }

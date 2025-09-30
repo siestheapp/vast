@@ -106,6 +106,17 @@ vast.add_business_rule("Never hard delete customer data")
 vast.add_design_decision("Use UUID for all primary keys")
 ```
 
+### MCP Server
+
+Install the MCP server dependencies and launch the bridge using either stdio or websocket transport:
+
+```bash
+pip install -r requirements-mcp.txt
+vast-mcp --transport stdio
+# Websocket mode
+vast-mcp --transport ws --host 127.0.0.1 --port 8901
+```
+
 ## 📚 Documentation
 
 - [Full Documentation](VAST_README.md) - Detailed architecture and setup

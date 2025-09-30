@@ -106,6 +106,56 @@
     return `<div class="result-scroll"><table class="result-table"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
   };
 
+  const maybeRenderExplain = (rows) => {
+    if (!Array.isArray(rows) || !rows.length) {
+      return null;
+    }
+    const first = rows[0];
+    if (!first || typeof first !== 'object' || !Object.prototype.hasOwnProperty.call(first, 'plan')) {
+      return null;
+    }
+    try {
+      const rawPlan = first.plan;
+      const parsed = typeof rawPlan === 'string' ? JSON.parse(rawPlan) : rawPlan;
+      const rootCandidate = Array.isArray(parsed)
+        ? (parsed[0] && (parsed[0].Plan || parsed[0]))
+        : (parsed && (parsed.Plan || parsed));
+      if (!rootCandidate || typeof rootCandidate !== 'object') {
+        return null;
+      }
+
+      const flattened = [];
+      const visit = (node) => {
+        if (!node || typeof node !== 'object') {
+          return;
+        }
+        flattened.push({
+          node_type: node['Node Type'] || '',
+          sort_key: Array.isArray(node['Sort Key']) ? node['Sort Key'].join(', ') : (node['Sort Key'] || ''),
+          plan_rows: node['Plan Rows'] ?? '',
+          startup_cost: node['Startup Cost'] ?? '',
+          total_cost: node['Total Cost'] ?? '',
+        });
+        const children = Array.isArray(node.Plans) ? node.Plans : [];
+        children.forEach(visit);
+      };
+
+      visit(rootCandidate);
+      if (!flattened.length) {
+        return null;
+      }
+
+      const columns = ['node_type', 'sort_key', 'plan_rows', 'startup_cost', 'total_cost'];
+      const normalized = flattened.map((row) => columns.map((col) => coerceCell(row[col])));
+      return {
+        html: buildTableHtml(columns, normalized),
+        rowCount: flattened.length,
+      };
+    } catch (err) {
+      return null;
+    }
+  };
+
   const buildMetaText = (rowCount, execMs, engineMs) => {
     const parts = [];
     if (typeof rowCount === 'number' && !Number.isNaN(rowCount)) {
@@ -137,18 +187,35 @@
     if (isWrite) {
       return '';
     }
-    if (kind && kind !== 'SELECT') {
+    if (kind && !['SELECT', 'EXPLAIN'].includes(kind)) {
       return '';
     }
 
     const rows = Array.isArray(execution.rows) ? execution.rows : [];
     const columns = deriveColumns(execution, rows);
-    const normalizedRows = normalizeRows(rows, columns);
-    const rowCount = typeof execution.row_count === 'number' ? execution.row_count : rows.length;
+    let rowCount = typeof execution.row_count === 'number' ? execution.row_count : rows.length;
     const { execMs, engineMs } = extractTimings(execution, payload && payload.meta);
 
-    const showEmpty = rowCount === 0 && rows.length === 0;
-    const tableHtml = normalizedRows.length ? buildTableHtml(columns, normalizedRows) : '';
+    let tableHtml = '';
+    let showEmpty = rowCount === 0 && rows.length === 0;
+
+    let explainView = null;
+    if (kind === 'EXPLAIN') {
+      explainView = maybeRenderExplain(rows);
+    }
+
+    if (explainView) {
+      tableHtml = explainView.html;
+      showEmpty = false;
+      if (typeof explainView.rowCount === 'number') {
+        rowCount = explainView.rowCount;
+      }
+    } else {
+      const normalizedRows = normalizeRows(rows, columns);
+      tableHtml = normalizedRows.length ? buildTableHtml(columns, normalizedRows) : '';
+      showEmpty = rowCount === 0 && rows.length === 0;
+    }
+
     const metaText = buildMetaText(rowCount, execMs, engineMs);
 
     if (!tableHtml && !showEmpty && !metaText) {

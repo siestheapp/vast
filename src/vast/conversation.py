@@ -871,7 +871,8 @@ Remember: You are VAST, with direct database access. Current context:
                 if not is_ddl and not is_write:
                     # Auto-execute read-only (e.g., SELECT, EXPLAIN, SHOW)
                     result = self._execute_sql(normalized, allow_ddl=False, user_input=user_input)
-                    self.last_actions.append(result | {"type": "dml"})
+                    # Record as a SQL query (read) action for grounding detection
+                    self.last_actions.append(result | {"type": "sql_query"})
                     if result.get("success"):
                         # Store up to 10 rows in conversation log for provenance
                         if "rows" in result and result["rows"]:
@@ -893,6 +894,37 @@ Remember: You are VAST, with direct database access. Current context:
                             metadata=result
                         )
                         self.messages.append(exec_msg)
+                        # Surface a UI-friendly payload so the desktop app can render a table
+                        # Match the API/service shape: sql, execution, intent, meta, breadcrumbs
+                        exec_meta = result.get("meta") or {}
+                        engine_ms = exec_meta.get("engine_ms", 0)
+                        exec_ms = exec_meta.get("exec_ms", 0)
+                        payload = {
+                            "sql": normalized if normalized.endswith(";") else f"{normalized};",
+                            "execution": {
+                                "rows": result.get("rows") or [],
+                                "row_count": result.get("count", 0),
+                                "meta": {"engine_ms": engine_ms, "exec_ms": exec_ms},
+                            },
+                            "meta": {"engine_ms": engine_ms, "exec_ms": exec_ms},
+                            "intent": "read",
+                        }
+                        # Attach table/metrics/linkables like service._attach_read_result
+                        try:
+                            from .service import _rows_to_table as _svc_rows_to_table  # type: ignore
+                            cols, table_rows = _svc_rows_to_table(payload["execution"]["rows"])  # type: ignore
+                            payload["result"] = {
+                                "columns": cols,
+                                "rows": table_rows[:50],
+                                "row_count": payload["execution"].get("row_count", len(table_rows)),
+                            }
+                            if cols and any(c.lower() == "url" for c in cols):
+                                payload["linkable_columns"] = [c for c in cols if c.lower() == "url"]
+                            if cols and "seen_at" in [c.lower() for c in cols] and "created_at" not in [c.lower() for c in cols]:
+                                payload.setdefault("notes", []).append("Interpreting 'added' as latest seen_at")
+                        except Exception:
+                            pass
+                        self.last_response_meta = payload
                     else:
                         console.print(f"[red]✗ Error: {result.get('error')}[/]")
                         response += f"\n\n⚠️ Execution error: {result.get('error')}"

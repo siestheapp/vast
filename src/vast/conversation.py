@@ -846,7 +846,8 @@ Remember: You are VAST, with direct database access. Current context:
                     "command": res.get("command"),
                 },
             )
-            self.last_actions.append(exec_msg.metadata)
+            # JSON-safe append
+            self.last_actions.append(jsonable_encoder(exec_msg.metadata, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
             self.messages.append(exec_msg)
             self._save_session()
             if ok:
@@ -868,7 +869,7 @@ Remember: You are VAST, with direct database access. Current context:
                     content="Generated ops plan (timeout fallback)",
                     metadata=audit_meta,
                 )
-                self.last_actions.append(exec_msg.metadata)
+                self.last_actions.append(jsonable_encoder(exec_msg.metadata, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
                 self.messages.append(exec_msg)
 
             response = _ensure_ops_plan_sections(response)
@@ -917,7 +918,7 @@ Remember: You are VAST, with direct database access. Current context:
                     # Auto-execute read-only (e.g., SELECT, EXPLAIN, SHOW)
                     result = self._execute_sql(normalized, allow_ddl=False, user_input=user_input)
                     # Record as a SQL query (read) action for grounding detection
-                    self.last_actions.append(result | {"type": "sql_query"})
+                    self.last_actions.append(jsonable_encoder(result | {"type": "sql_query"}, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
                     if result.get("success"):
                         # Store up to 10 rows in conversation log for provenance
                         if "rows" in result and result["rows"]:
@@ -989,7 +990,7 @@ Remember: You are VAST, with direct database access. Current context:
 
                 if should_execute:
                     result = self._execute_sql(normalized, allow_ddl=is_ddl, user_input=user_input)
-                    self.last_actions.append(result)
+                    self.last_actions.append(jsonable_encoder(result, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
                     if result.get("success"):
                         console.print("[green]✓ Executed successfully[/]")
                         exec_msg = Message(
@@ -1024,7 +1025,7 @@ Remember: You are VAST, with direct database access. Current context:
             if should_execute:
                 for cmd in bash_blocks:
                     result = self._execute_system_command(cmd)
-                    self.last_actions.append(result)
+                    self.last_actions.append(jsonable_encoder(result, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
                     
                     if result["success"]:
                         console.print(f"[green]✓ System command executed successfully[/]")
@@ -1056,7 +1057,7 @@ Remember: You are VAST, with direct database access. Current context:
                             sql_content = response[start:end].strip()
                             wf = service.repo_write(path, sql_content, overwrite=True)
                             ap = service.apply_sql(path)
-                            self.last_actions.append({"success": True if ap.get("ok") else False, "type": "ddl", "file": path})
+                            self.last_actions.append(jsonable_encoder({"success": True if ap.get("ok") else False, "type": "ddl", "file": path}, custom_encoder={datetime: lambda x: x.isoformat(), date: lambda x: x.isoformat(), Decimal: float, uuid.UUID: str, Path: str}))
                             if ap.get("ok"):
                                 response += f"\n\nApplied migration: {path}"
                             else:

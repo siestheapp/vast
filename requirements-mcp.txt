@@ -1,4 +1,5 @@
-model-context-protocol
-uvicorn
-uvloop
-websockets
+mcp>=1.1.2
+uvicorn>=0.30
+uvloop>=0.19
+websockets>=12
+

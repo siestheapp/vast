@@ -113,6 +113,8 @@ Install the MCP server dependencies and launch the bridge using either stdio or 
 ```bash
 pip install -r requirements-mcp.txt
 vast-mcp --transport stdio
+# or run as a module
+python -m vast_mcp.server --transport stdio
 # Websocket mode
 vast-mcp --transport ws --host 127.0.0.1 --port 8901
 ```
